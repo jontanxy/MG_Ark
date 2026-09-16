@@ -4,7 +4,7 @@ from collections.abc import Iterable
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-from ..constants import CATEGORY_FLAGS, CATEGORY_LABELS, AssetCategory, ProjectStatus, Role
+from ..constants import CATEGORY_FLAGS, CATEGORY_LABELS, REVOCABLE_STATUSES, AssetCategory, ProjectStatus, Role
 from ..models import MGGroup, Project, User
 
 DECLARABLE = (AssetCategory.TIMELINE, AssetCategory.CONTIN_VIDEOS, AssetCategory.CONTIN_LYRICS, AssetCategory.PSD)
@@ -74,14 +74,28 @@ def project_menu_keyboard(project: Project) -> InlineKeyboardMarkup:
         [_btn("⚙️ Declared assets", f"pj:{pid}:decl"), _btn("💬 MG group", f"pj:{pid}:group")],
         [_btn("🎞 Generate previews", f"pj:{pid}:prev"), _btn("▶️ Previews", f"pj:{pid}:previews")],
     ]
+    if project.status == ProjectStatus.CANCELLED:
+        rows = [
+            [_btn("ℹ️ Details", f"pj:{pid}:details"), _btn("♻️ Restore project", f"pj:{pid}:restore")],
+            [_btn("◀️ Projects", "pl:0:open")],
+        ]
+        return InlineKeyboardMarkup(rows)
     if project.status == ProjectStatus.READY_FOR_VERIFICATION:
         rows.append([_btn("✅ Verify & archive", f"pj:{pid}:verify")])
     elif project.status == ProjectStatus.ARCHIVED:
         rows.append([_btn("🔓 Reopen", f"pj:{pid}:reopen")])
+    if project.status in REVOCABLE_STATUSES:
+        rows.append([_btn("🗑 Revoke project", f"pj:{pid}:revoke")])
     if project.drive_link:
         rows.append([InlineKeyboardButton("📁 Open in Google Drive", url=project.drive_link)])
     rows.append([_btn("◀️ Projects", "pl:0:open")])
     return InlineKeyboardMarkup(rows)
+
+
+def confirm_revoke_keyboard(project_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[_btn("🗑 Yes, revoke and trash the folder", f"pj:{project_id}:revoke2"), _btn("Cancel", f"pj:{project_id}:menu")]]
+    )
 
 
 def back_to_project_keyboard(project_id: int, extra_rows: list[list[InlineKeyboardButton]] | None = None) -> InlineKeyboardMarkup:
@@ -124,7 +138,7 @@ def projects_list_keyboard(projects: list[Project], page: int, page_size: int, m
     if nav:
         rows.append(nav)
     toggle = "open" if mode != "open" else "archived"
-    rows.append([_btn("📦 Show archived" if mode == "open" else "🟢 Show open", f"pl:0:{toggle}")])
+    rows.append([_btn("📦 Show archived & cancelled" if mode == "open" else "🟢 Show open", f"pl:0:{toggle}")])
     return InlineKeyboardMarkup(rows)
 
 

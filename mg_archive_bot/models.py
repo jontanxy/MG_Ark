@@ -177,6 +177,8 @@ class Project(Base):
     last_reminder_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     verified_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
     verified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    cancelled_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     tags: Mapped[list[Tag]] = relationship(Tag, secondary="project_tags", lazy="selectin", order_by=Tag.name)
     collection_folder: Mapped[Collection | None] = relationship(Collection, lazy="joined")
