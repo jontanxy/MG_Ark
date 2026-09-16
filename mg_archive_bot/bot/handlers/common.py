@@ -38,6 +38,7 @@ def help_text(user: User | None, *, private: bool) -> str:
             "/newproject — create a new archive (folders + announcement)",
             "/projects — manage archives: progress, reminders, designers, metadata, verification",
             "/creategroup — Create MG Group: token to authorise a new group",
+            "/sheet — link to the project index sheet (one row per project)",
         ]
     if rank >= ROLE_RANK[Role.SUPER_ADMIN]:
         lines += [

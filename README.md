@@ -16,6 +16,7 @@ Requirements: `docs/REQUIREMENTS.md` · Design: `docs/DESIGN.md`
 | Reminders | Daily reminder in the MG Group listing missing folders and mentioning the responsible designers; on-demand `/status` and `/remind` |
 | Previews | ProRes 4444 files in Timeline / Contin Videos are transcoded to small MP4s (ffmpeg) stored in `_Previews/` on Drive; **Preview** hands out their Drive links privately (nothing is uploaded to Telegram) |
 | Discovery | `/search worship, gold, particles` (AND, case-insensitive, de-duplicated) ranked: exact tag → name → event/collection → metadata → description. Result cards offer **Preview**, **Open Archive**, **Details** |
+| Project index | A Google Sheet in the archive root with one row per project ever created, kept in sync automatically (`/sheet`) |
 | Roles | Super Admin (fixed Telegram ID), Team Lead, Designer — exactly the permissions in the requirements |
 | Access | Password registration on `/start` (never asked again), revocation, brute-force lockout, MG Groups authorised only via provisioning tokens, "authorised user AND authorised group" rule in groups |
 
@@ -47,7 +48,8 @@ Two supported modes. Pick one.
 
 ### Option A — Service account + Shared Drive (recommended for Google Workspace)
 
-1. In [Google Cloud Console](https://console.cloud.google.com/) create a project, enable the **Google Drive API**.
+1. In [Google Cloud Console](https://console.cloud.google.com/) create a project, enable the **Google Drive API**
+   and the **Google Sheets API** (the latter is only needed for the project index sheet).
 2. IAM & Admin → Service Accounts → create one → Keys → **Add key (JSON)**. Save it as `secrets/service-account.json`.
 3. Share the archive with the service account's e-mail (`…@….iam.gserviceaccount.com`) as **Content manager** —
    either as a member of the whole Shared Drive, or just on the root folder (Share → add the e-mail). Folder-level
@@ -137,7 +139,23 @@ On first start the access password is seeded from `INITIAL_ACCESS_PASSWORD`; aft
   finds all of them. A collection folder that already exists under the root is re-used.
 * `/projects` → project menu: **Check progress**, **Announce**, **Remind**, **Assign designers** (per folder group),
   **Edit metadata**, **Declared assets**, **MG group**, **Generate previews**, **Previews**, **Verify & archive**,
-  **Reopen**, **Open in Google Drive**.
+  **Reopen**, **Revoke project**, **Open in Google Drive**.
+* **Revoke project** (for a project that will not go ahead): after a confirmation, its Drive folder is moved to the
+  trash, tracking and reminders stop, it disappears from search, its row is removed from the index sheet (rows below
+  move up) and the MG Group is told. A Drive manager can recover the folder from the trash for 30 days, and
+  **Restore project** in the bot undoes the whole thing (the row is added back). Archived projects must be reopened before they can be revoked.
+
+**Project index sheet**
+
+* The bot keeps a Google Sheet, **MG Archive Index**, in the archive root folder: one row per project (collection,
+  name, status, year, event, ministry, style, colours, tags, declared assets, assigned designers, creator, dates,
+  verifier, MG Group, preview count, last check, Drive link, description). Rows are written when a project is created
+  and refreshed on every status, metadata, assignment or group change; a nightly job rewrites the whole sheet from the
+  database as a safety net.
+* `/sheet` (Team Lead) sends the link; `/sheet rebuild` rewrites it on demand. The sheet is plain data with a frozen,
+  filterable header row, so it stays readable for years (Google Sheets allows 10 million cells ≈ 400 000 projects).
+* Requires the **Google Sheets API** to be enabled in the same Cloud project as the Drive API (APIs & Services →
+  Library → Google Sheets API → Enable). If it is not, the bot keeps working and DMs the Super Admin once.
 
 **Everyone (private chat)**
 
@@ -203,7 +221,23 @@ The suite (53 tests) covers services, validation/state machine, search ranking, 
   delete it in the Cloud Console *Keys* tab and download a new one; access password → `/setpassword` and revoke any
   unexpected users in `/users`.
 
-## 11. Troubleshooting
+## 11. Publishing the code (GitHub)
+
+The repository contains no secrets: the bot token, Super Admin id, password, Google key, database and log live only in
+`.env`, `secrets/` and `data/`, which `.gitignore` excludes. Someone who clones the code can only run **their own**
+instance with their own BotFather token, Google project and database — it cannot connect to your bot, your Drive or
+your users, and changing `SUPER_ADMIN_TELEGRAM_ID` in their copy only affects their copy.
+
+Before the first push, confirm nothing sensitive is staged:
+
+```bash
+git status --short && git check-ignore -v .env secrets/service-account.json data/mg_archive.sqlite3 data/bot.log
+```
+
+Every path must be reported as ignored. If a secret is ever committed by mistake, rotating it is the only fix
+(BotFather → regenerate token; Cloud Console → delete the key; `/setpassword`), because git history keeps old versions.
+
+## 12. Troubleshooting
 
 The bot logs to the terminal **and** to `data/bot.log` (rotating). When something does not respond, look there first:
 
