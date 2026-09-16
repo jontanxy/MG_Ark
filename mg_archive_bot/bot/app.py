@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import time
+from types import SimpleNamespace
 
 from telegram import BotCommand, BotCommandScopeAllGroupChats, BotCommandScopeAllPrivateChats, BotCommandScopeChat, LinkPreviewOptions, Update
 from telegram.constants import ParseMode
@@ -21,7 +22,7 @@ from ..config import Settings
 from ..services.drive import DriveClient
 from ..util import resolve_tz
 from .handlers import admin, auth, common, group_mode, mg_groups, projects, search, text_router
-from .jobs import PreviewWorker, leave_stale_chats_job, reminder_job, scan_job
+from .jobs import PreviewWorker, leave_stale_chats_job, rebuild_sheet_job, reminder_job, scan_job
 
 log = logging.getLogger(__name__)
 
@@ -31,6 +32,7 @@ PRIVATE_COMMANDS = [
     BotCommand("projects", "Manage archives (Team Lead)"),
     BotCommand("newproject", "Create a new archive (Team Lead)"),
     BotCommand("creategroup", "Token to authorise an MG Group (Team Lead)"),
+    BotCommand("sheet", "Link to the project index sheet (Team Lead)"),
     BotCommand("whoami", "Show your role"),
     BotCommand("cancel", "Abort the current step"),
     BotCommand("help", "Show help"),
@@ -64,12 +66,15 @@ async def _post_init(application: Application) -> None:
 
 
 async def _post_shutdown(application: Application) -> None:
+    from .actions import flush_sheet_syncs
+
     worker: PreviewWorker | None = application.bot_data.get("preview_worker")
     if worker is not None:
         await worker.stop()
+    await flush_sheet_syncs(SimpleNamespace(bot=application.bot, bot_data=application.bot_data))
 
 
-def build_application(settings: Settings, drive: DriveClient) -> Application:
+def build_application(settings: Settings, drive: DriveClient, sheets=None) -> Application:
     tz = resolve_tz(settings.timezone)
     defaults = Defaults(parse_mode=ParseMode.HTML, tzinfo=tz, link_preview_options=LinkPreviewOptions(is_disabled=True))
     builder: ApplicationBuilder = (
@@ -86,6 +91,8 @@ def build_application(settings: Settings, drive: DriveClient) -> Application:
     )
     app = builder.build()
     app.bot_data.update({"settings": settings, "drive": drive, "tz": tz})
+    if sheets is not None:
+        app.bot_data["sheets"] = sheets
     register_handlers(app)
     register_jobs(app, settings, tz)
     return app
@@ -102,6 +109,7 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("project", projects.cmd_project))
     app.add_handler(CommandHandler("newproject", projects.cmd_newproject))
     app.add_handler(CommandHandler("creategroup", mg_groups.cmd_creategroup))
+    app.add_handler(CommandHandler("sheet", projects.cmd_sheet))
     app.add_handler(CommandHandler("users", admin.cmd_users))
     app.add_handler(CommandHandler("groups", admin.cmd_groups))
     app.add_handler(CommandHandler("setpassword", admin.cmd_setpassword))
@@ -131,6 +139,7 @@ def register_jobs(app: Application, settings: Settings, tz) -> None:
     jq.run_repeating(scan_job, interval=settings.scan_interval_minutes * 60, first=120, name="scan")
     jq.run_daily(reminder_job, time=time(hour=settings.reminder_hour, minute=0, tzinfo=tz), name="reminders")
     jq.run_repeating(leave_stale_chats_job, interval=600, first=300, name="leave-stale-chats")
+    jq.run_daily(rebuild_sheet_job, time=time(hour=3, minute=30, tzinfo=tz), name="rebuild-sheet")
 
 
 ALLOWED_UPDATES = [Update.MESSAGE, Update.CALLBACK_QUERY, Update.MY_CHAT_MEMBER]

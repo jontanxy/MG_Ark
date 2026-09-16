@@ -35,6 +35,7 @@ class ProjectStatus(str, enum.Enum):
     INCOMPLETE = "INCOMPLETE"
     READY_FOR_VERIFICATION = "READY_FOR_VERIFICATION"
     ARCHIVED = "ARCHIVED"
+    CANCELLED = "CANCELLED"  # revoked: Drive folder trashed, no tracking, hidden from search
 
 
 SCANNABLE_STATUSES = frozenset(
@@ -47,7 +48,10 @@ STATUS_LABELS: dict[ProjectStatus, str] = {
     ProjectStatus.INCOMPLETE: "🟠 Incomplete",
     ProjectStatus.READY_FOR_VERIFICATION: "🔵 Ready for verification",
     ProjectStatus.ARCHIVED: "✅ Archived",
+    ProjectStatus.CANCELLED: "🗑 Cancelled",
 }
+
+REVOCABLE_STATUSES = frozenset({ProjectStatus.ACTIVE, ProjectStatus.INCOMPLETE, ProjectStatus.READY_FOR_VERIFICATION})
 
 
 class AssetCategory(str, enum.Enum):
