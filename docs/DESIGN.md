@@ -112,7 +112,10 @@ ACTIVE / INCOMPLETE / READY_FOR_VERIFICATION ──(scan: not complete)──▶
 ACTIVE / INCOMPLETE ──(scan: complete)──▶ READY_FOR_VERIFICATION   (+ group + team-lead notice)
 READY_FOR_VERIFICATION ──(Team Lead "Verify")──▶ ARCHIVED           (+ group notice)
 ARCHIVED ──(Team Lead "Reopen")──▶ ACTIVE
+ACTIVE / INCOMPLETE / READY_FOR_VERIFICATION ──(Team Lead "Revoke", confirmed)──▶ CANCELLED   (Drive folder trashed first; preview rows removed; group notice)
+CANCELLED ──(Team Lead "Restore")──▶ ACTIVE   (folder untrashed)
 ```
+CANCELLED projects are never scanned, reminded about, or returned by search; they remain in `/projects` (archived & cancelled view) and in the database, but their row is deleted from the index sheet (rebuilds also omit them; restore re-adds the row).
 ARCHIVED projects are not rescanned automatically. Verify is only offered when the latest scan is complete (a fresh scan is run first).
 
 Scans: every `SCAN_INTERVAL_MINUTES` (default 30) for all ACTIVE/INCOMPLETE/READY projects; on demand from the project menu (`Check progress`) and group `/status`.
@@ -188,6 +191,13 @@ Bot in a chat with no authorisation and no valid token within `UNAUTHORISED_GROU
 * **Progress / reminder** (`/status`, daily reminder job at `REMINDER_HOUR` local time, "Remind" button): ✅/❌ per required leaf, missing items with responsible designers mentioned. Reminder job skips projects reminded within the last 20 h and projects that are complete/archived.
 * **Ready for verification**: posted once when a scan flips the project to READY.
 * **Archived**: posted when the Team Lead verifies.
+
+## 12b. Project index sheet
+
+* `services/sheets.py` wraps the Sheets v4 API (values get/update/append/clear, batchUpdate) with an in-memory fake for tests / fake mode. `services/tracking.py` owns the layout: 25 columns (ID … Description), header frozen + bold + basic filter.
+* The spreadsheet is created once in the archive root via the Drive API (`mimeType=spreadsheet`) and its id is stored in `settings` (`tracking_sheet_id`); `TRACKING_SHEET_ID` can point at an existing sheet instead.
+* Sync = upsert by project ID (column A): after create, metadata/declaration/assignment/group changes, verify/reopen and any status transition from a scan. Syncs run as fire-and-forget tasks under one asyncio lock so handlers stay fast; failures are logged and DM'd to the Super Admin once. A nightly job (03:30 local) rebuilds the whole sheet from the database; `/sheet rebuild` does the same on demand.
+* The database stays the source of truth; the sheet is a read-only view for humans. Scale: one row per project, well inside the 10-million-cell limit.
 
 ## 12a. Startup checks
 
