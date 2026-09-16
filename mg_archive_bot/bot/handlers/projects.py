@@ -11,7 +11,6 @@ from telegram.ext import ContextTypes
 from ...constants import (
     CATEGORY_LABELS,
     METADATA_FIELDS,
-    REVOCABLE_STATUSES,
     ROLE_RANK,
     STATUS_LABELS,
     AssetCategory,
@@ -30,13 +29,12 @@ from ...services.projects import ProjectError
 from ...services.validation import latest_report
 from ...util import esc
 from ..access import clear_prompt, drive_of, project_lock, require, safe_edit, set_prompt, settings_of
-from ..actions import check_project, post_to_group, rebuild_sheet, schedule_sheet_sync, sheet_location, tree_of, user_by_id
+from ..actions import check_project, post_to_group, tree_of, user_by_id
 from ..keyboards import (
     assign_category_keyboard,
     collection_choice_keyboard,
     back_to_project_keyboard,
     confirm_keyboard,
-    confirm_revoke_keyboard,
     confirm_verify_keyboard,
     declaration_keyboard,
     group_choice_keyboard,
@@ -101,9 +99,9 @@ def _load_project(session: Session, project_id: int) -> Project | None:
 
 
 def _list_payload(session: Session, page: int, mode: str):
-    statuses = (ProjectStatus.ARCHIVED, ProjectStatus.CANCELLED) if mode == "archived" else OPEN_STATUSES
+    statuses = (ProjectStatus.ARCHIVED,) if mode == "archived" else OPEN_STATUSES
     projects = project_service.list_projects(session, statuses)
-    title = "📦 <b>Archived & cancelled projects</b>" if mode == "archived" else "🗂 <b>Open projects</b>"
+    title = "📦 <b>Archived projects</b>" if mode == "archived" else "🗂 <b>Open projects</b>"
     if not projects:
         body = "\n\nNothing here yet." + ("" if mode == "archived" else " Create one with /newproject.")
     else:
@@ -323,7 +321,6 @@ async def _wizard_create(update: Update, context: ContextTypes.DEFAULT_TYPE, ses
             return
         session.commit()
     context.user_data.pop("wizard", None)
-    schedule_sheet_sync(context, project.id)
     posted = await post_to_group(context, project.mg_group_chat_id, notifications.announcement(project, tree_of(context)))
     note = "✅ <b>Archive created.</b> "
     if project.mg_group_chat_id and not posted:
@@ -433,7 +430,6 @@ async def handle_meta_value(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             return
         session.commit()
         clear_prompt(context)
-        schedule_sheet_sync(context, project.id)
         await update.message.reply_text(
             f"✅ <b>{METADATA_FIELDS[field]}</b> set to: {esc(stored) if stored else '—'}\n\n" + _metadata_text(project),
             reply_markup=metadata_field_keyboard(project, METADATA_FIELDS),
@@ -527,7 +523,6 @@ async def project_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, a
                 await query.answer(str(exc), show_alert=True)
                 return
             session.commit()
-            schedule_sheet_sync(context, project.id)
             await query.answer("Assigned" if now_on else "Unassigned")
             users = user_service.list_active_users(session)
             selected = {a.user_id for a in project.assignments if a.category == category}
@@ -579,7 +574,6 @@ async def project_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, a
                     session.rollback()
                     log.warning("ensure_folders failed: %s", exc)
                     toast, alert = f"Saved, but Drive folder creation failed: {exc}"[:190], True
-            schedule_sheet_sync(context, project.id)
             await query.answer(toast, show_alert=alert)
             await query.edit_message_reply_markup(declaration_keyboard(project, f"pj:{project.id}:dt", done_text="◀️ Back to project"))
 
@@ -598,7 +592,6 @@ async def project_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, a
                 await query.answer(str(exc), show_alert=True)
                 return
             session.commit()
-            schedule_sheet_sync(context, project.id)
             await query.answer("MG Group updated")
             await _show_menu(update, context, session, project)
 
@@ -648,66 +641,11 @@ async def project_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, a
                     await query.answer(str(exc), show_alert=True)
                     return
                 session.commit()
-            schedule_sheet_sync(context, project.id)
             await query.answer("Archived ✅")
             verifier = user_by_id(session, actor.telegram_id)
             await post_to_group(context, project.mg_group_chat_id, notifications.archived_message(project, verifier))
             await _show_menu(update, context, session, project, prefix="✅ <b>Archived.</b>\n\n")
             log.info("Project %s archived by %s", project.name, actor.telegram_id)
-
-        elif action == "revoke":
-            if project.status not in REVOCABLE_STATUSES:
-                await query.answer("Only active, incomplete or ready projects can be revoked.", show_alert=True)
-                return
-            await query.answer()
-            report = latest_report(session, project)
-            files = sum(i.file_count or 0 for i in report.required_items) if report else 0
-            await safe_edit(
-                update,
-                f"🗑 <b>Revoke {esc(project.full_name)}?</b>\n\n"
-                f"• Its Google Drive folder (last check: {files} file{'s' if files != 1 else ''} in required folders) is moved to the <b>trash</b>.\n"
-                "• Tracking, reminders and previews stop; it disappears from search.\n"
-                "• The MG Group is notified.\n\n"
-                "A Drive manager can recover the folder from the trash for 30 days, and “Restore project” undoes this.",
-                confirm_revoke_keyboard(project.id),
-            )
-
-        elif action == "revoke2":
-            async with project_lock(context, project.id):
-                session.refresh(project)
-                try:
-                    trashed = await project_service.revoke_project(session, project, drive_of(context), actor.telegram_id)
-                except ProjectError as exc:
-                    await query.answer(str(exc), show_alert=True)
-                    return
-                except DriveError as exc:
-                    session.rollback()
-                    await query.answer(f"Drive refused to trash the folder: {exc}"[:190], show_alert=True)
-                    return
-                session.commit()
-            schedule_sheet_sync(context, project.id)
-            await query.answer("Project revoked")
-            await post_to_group(context, project.mg_group_chat_id, notifications.cancelled_message(project, user_by_id(session, actor.telegram_id), trashed))
-            await _show_menu(update, context, session, project, prefix="🗑 <b>Revoked.</b> " + ("The Drive folder is in the trash.\n\n" if trashed else "\n\n"))
-            log.info("Project %s revoked by %s", project.full_name, actor.telegram_id)
-
-        elif action == "restore":
-            async with project_lock(context, project.id):
-                session.refresh(project)
-                try:
-                    await project_service.restore_project(session, project, drive_of(context))
-                except ProjectError as exc:
-                    await query.answer(str(exc), show_alert=True)
-                    return
-                except DriveError as exc:
-                    session.rollback()
-                    await query.answer(f"Drive could not restore the folder: {exc}"[:190], show_alert=True)
-                    return
-                session.commit()
-            schedule_sheet_sync(context, project.id)
-            await query.answer("Restored")
-            await post_to_group(context, project.mg_group_chat_id, notifications.restored_message(project))
-            await _show_menu(update, context, session, project, prefix="♻️ <b>Restored.</b>\n\n")
 
         elif action == "reopen":
             async with project_lock(context, project.id):
@@ -718,7 +656,6 @@ async def project_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, a
                     await query.answer(str(exc), show_alert=True)
                     return
                 session.commit()
-            schedule_sheet_sync(context, project.id)
             await query.answer("Reopened")
             await post_to_group(context, project.mg_group_chat_id, notifications.reopened_message(project))
             await _show_menu(update, context, session, project, prefix="🔓 <b>Reopened.</b>\n\n")
@@ -729,27 +666,3 @@ async def project_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, a
 
 def status_label(project: Project) -> str:
     return STATUS_LABELS[project.status]
-
-
-@require(Role.TEAM_LEAD)
-async def cmd_sheet(update: Update, context: ContextTypes.DEFAULT_TYPE, actor: User) -> None:
-    """Link to the project index sheet; ``/sheet rebuild`` rewrites it from the database."""
-    if not settings_of(context).tracking_sheet_enabled:
-        await update.message.reply_text("The project index sheet is disabled in the configuration.")
-        return
-    args = [a.lower() for a in (context.args or [])]
-    try:
-        if args and args[0] == "rebuild":
-            count, url = await rebuild_sheet(context)
-            await update.message.reply_text(f"🔄 Index rebuilt: {count} project{'s' if count != 1 else ''}.\n{url}")
-            return
-        _, url = await sheet_location(context)
-    except Exception as exc:  # noqa: BLE001 - surface the reason instead of a generic error
-        await update.message.reply_text(f"❌ Could not reach the project index sheet: {esc(str(exc)[:400])}")
-        return
-    with session_scope() as session:
-        total = len(project_service.list_projects(session, [st for st in ProjectStatus if st != ProjectStatus.DRAFT]))
-    await update.message.reply_text(
-        f"📋 <b>Project index</b> — {total} project{'s' if total != 1 else ''}, one row each, updated automatically.\n{url}\n\n"
-        "Send <code>/sheet rebuild</code> to rewrite it from the database."
-    )

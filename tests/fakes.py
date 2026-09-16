@@ -183,11 +183,8 @@ class BotHarness:
 
         from mg_archive_bot.bot.app import register_handlers
 
-        from mg_archive_bot.services.sheets import InMemorySheetsClient
-
         self.bot = FakeBot()
-        self.sheets = InMemorySheetsClient()
-        self.bot_data = {"settings": settings, "drive": drive, "sheets": self.sheets, "tz": tz or ZoneInfo(settings.timezone or "UTC")}
+        self.bot_data = {"settings": settings, "drive": drive, "tz": tz or ZoneInfo(settings.timezone or "UTC")}
         self.user_data: dict[int, dict] = {}
         app = Application.builder().token("123:TEST").build()
         register_handlers(app)

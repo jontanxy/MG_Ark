@@ -13,7 +13,6 @@ from .config import Settings
 from .db import init_db, session_scope
 from .services import users as user_service
 from .services.drive import DriveError, build_drive_client
-from .services.sheets import build_sheets_client
 
 
 def check_drive_root(settings: Settings, drive, log: logging.Logger) -> None:
@@ -84,12 +83,11 @@ def main() -> int:
     try:
         drive = build_drive_client(settings)
         check_drive_root(settings, drive, log)
-        sheets = build_sheets_client(settings) if settings.tracking_sheet_enabled else None
     except (DriveError, OSError, ValueError) as exc:
         log.error("Google Drive setup failed: %s", exc)
         return 2
 
-    app = build_application(settings, drive, sheets)
+    app = build_application(settings, drive)
     log.info("Starting long polling…")
     try:
         app.run_polling(allowed_updates=ALLOWED_UPDATES, drop_pending_updates=False)

@@ -15,9 +15,7 @@ from ..db import session_scope
 from ..models import PreviewAsset, Project, User
 from ..services import groups as group_service
 from ..services import notifications
-from ..services import tracking
 from ..services.previews import PreviewJob, PreviewOrphan, plan_previews, remove_orphans
-from ..services.sheets import spreadsheet_url
 from ..services.validation import ScanResult, validate_project
 from ..util import esc, human_size
 from .access import drive_of, project_lock, settings_of
@@ -97,8 +95,6 @@ async def check_project(
             jobs = plan_previews(session, project, result.source_files, force=force_previews, orphans=orphans)
         session.commit()
     outcome = CheckOutcome(result)
-    if result.old_status != result.new_status:
-        schedule_sheet_sync(context, project.id)
     if orphans:
         await asyncio.to_thread(remove_orphans, orphans, drive)
     if result.became_ready:
@@ -136,97 +132,3 @@ async def send_preview(context: ContextTypes.DEFAULT_TYPE, chat_id: int, preview
 
 def user_by_id(session: Session, user_id: int | None) -> User | None:
     return session.get(User, user_id) if user_id is not None else None
-
-
-# ----------------------------------------------------------------------------------------
-# Project index sheet
-# ----------------------------------------------------------------------------------------
-
-
-def _sheet_lock(context: ContextTypes.DEFAULT_TYPE) -> asyncio.Lock:
-    lock = context.bot_data.get("sheet_lock")
-    if lock is None:
-        lock = context.bot_data["sheet_lock"] = asyncio.Lock()
-    return lock
-
-
-async def _report_sheet_failure(context: ContextTypes.DEFAULT_TYPE, exc: Exception) -> None:
-    log.warning("Project index sheet sync failed: %s", exc)
-    if not context.bot_data.get("sheet_failure_reported"):
-        context.bot_data["sheet_failure_reported"] = True
-        await notify_user(
-            context,
-            settings_of(context).super_admin_telegram_id,
-            f"⚠️ The project index sheet could not be updated: {esc(str(exc)[:400])}\n\n"
-            "The bot keeps working; run /sheet rebuild once the problem is fixed.",
-        )
-
-
-async def sheet_location(context: ContextTypes.DEFAULT_TYPE) -> tuple[str, str]:
-    """(spreadsheet id, url) of the project index, creating the spreadsheet on first use."""
-    settings, drive = settings_of(context), drive_of(context)
-    sheets = context.bot_data["sheets"]
-    if settings.tracking_sheet_id:
-        return settings.tracking_sheet_id, spreadsheet_url(settings.tracking_sheet_id)
-
-    def _stored() -> tuple[str | None, str | None]:
-        with session_scope() as session:  # short read; never held across an await
-            return tracking.stored_sheet(session)
-
-    sheet_id, url = _stored()
-    if sheet_id:
-        return sheet_id, url or spreadsheet_url(sheet_id)
-    async with _sheet_lock(context):
-        sheet_id, url = _stored()  # another task may have created it while we waited
-        if sheet_id:
-            return sheet_id, url or spreadsheet_url(sheet_id)
-        sheet_id, url = await asyncio.to_thread(tracking.create_sheet, drive, sheets, settings)
-        with session_scope() as session:
-            tracking.remember_sheet(session, sheet_id, url)
-        return sheet_id, url
-
-
-async def sync_project_row(context: ContextTypes.DEFAULT_TYPE, project_id: int) -> None:
-    """Write/refresh one project's row in the index sheet. Never raises (failures are logged + reported once)."""
-    try:
-        sheet_id, _ = await sheet_location(context)
-        with session_scope() as session:
-            project = session.get(Project, project_id)
-            if project is None or project.status.value == "DRAFT":
-                return
-            row = None if project.status.value == "CANCELLED" else tracking.build_row(session, project, context.bot_data["tz"])
-        async with _sheet_lock(context):
-            if row is None:  # revoked: the row disappears and everything below moves up
-                await asyncio.to_thread(tracking.delete_row, context.bot_data["sheets"], sheet_id, project_id)
-            else:
-                await asyncio.to_thread(tracking.upsert_row, context.bot_data["sheets"], sheet_id, row)
-        context.bot_data.pop("sheet_failure_reported", None)
-    except Exception as exc:  # noqa: BLE001 - the index must never break the main flow
-        await _report_sheet_failure(context, exc)
-
-
-def schedule_sheet_sync(context: ContextTypes.DEFAULT_TYPE, project_id: int) -> None:
-    """Fire-and-forget row sync so handlers stay fast. Use ``flush_sheet_syncs`` to await them (tests, shutdown)."""
-    if not settings_of(context).tracking_sheet_enabled or "sheets" not in context.bot_data:
-        return
-    tasks: set[asyncio.Task] = context.bot_data.setdefault("sheet_tasks", set())
-    task = asyncio.create_task(sync_project_row(context, project_id), name=f"sheet-sync-{project_id}")
-    tasks.add(task)
-    task.add_done_callback(tasks.discard)
-
-
-async def flush_sheet_syncs(context: ContextTypes.DEFAULT_TYPE) -> None:
-    tasks = list(context.bot_data.get("sheet_tasks", ()))
-    if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)
-
-
-async def rebuild_sheet(context: ContextTypes.DEFAULT_TYPE) -> tuple[int, str]:
-    """Rewrite the whole index from the database. Returns (rows, url). Raises on failure."""
-    sheet_id, url = await sheet_location(context)
-    with session_scope() as session:
-        rows = tracking.all_rows(session, context.bot_data["tz"])
-    async with _sheet_lock(context):
-        count = await asyncio.to_thread(tracking.rebuild, context.bot_data["sheets"], sheet_id, rows)
-    context.bot_data.pop("sheet_failure_reported", None)
-    return count, url

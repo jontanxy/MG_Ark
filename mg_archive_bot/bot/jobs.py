@@ -19,7 +19,7 @@ from ..services.drive import file_link
 from ..services.previews import PreviewJob, kill_active_transcodes, process_preview, record_result
 from ..util import esc, human_size, utcnow
 from .access import drive_of, settings_of
-from .actions import check_project, notify_user, post_to_group, rebuild_sheet, tree_of
+from .actions import check_project, notify_user, post_to_group, tree_of
 
 log = logging.getLogger(__name__)
 
@@ -143,17 +143,6 @@ async def reminder_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     project_service.mark_reminded(session, project)
         except Exception:  # noqa: BLE001
             log.exception("Reminder failed for project %s", pid)
-
-
-async def rebuild_sheet_job(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Nightly reconciliation of the project index sheet (fixes any row that a live sync missed)."""
-    if not settings_of(context).tracking_sheet_enabled or "sheets" not in context.bot_data:
-        return
-    try:
-        count, _ = await rebuild_sheet(context)
-        log.info("Project index rebuilt: %d rows", count)
-    except Exception as exc:  # noqa: BLE001
-        log.warning("Nightly index rebuild failed: %s", exc)
 
 
 async def leave_stale_chats_job(context: ContextTypes.DEFAULT_TYPE) -> None:

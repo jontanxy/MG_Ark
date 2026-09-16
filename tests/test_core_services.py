@@ -297,44 +297,6 @@ def test_schema_upgrade_adds_missing_columns(tmp_path):
     engine.dispose()
 
 
-@pytest.mark.asyncio
-async def test_tracking_sheet_service(db, settings, drive):
-    from zoneinfo import ZoneInfo
-
-    from mg_archive_bot.services import tracking
-    from mg_archive_bot.services.sheets import InMemorySheetsClient
-
-    sheets = InMemorySheetsClient()
-    tz = ZoneInfo("Asia/Singapore")
-    with session_scope() as s:
-        user_service.register_designer(s, 11, "Alice", None)
-        sheet_id, url = tracking.ensure_sheet(s, drive, sheets, settings)
-        assert url == f"https://docs.google.com/spreadsheets/d/{sheet_id}/edit"
-        assert drive.get_file(sheet_id).name == "MG Archive Index" and drive.path_of(sheet_id) == "Archive Root/MG Archive Index"
-        assert tracking.ensure_sheet(s, drive, sheets, settings) == (sheet_id, url)  # remembered, not re-created
-        assert sheets.get_values(sheet_id, "'Projects'!A1:Y1")[0] == tracking.HEADERS
-        assert any("frozenRowCount" in str(r) for r in sheets.requests) and any("setBasicFilter" in r for r in sheets.requests)
-        p = project_service.create_draft(s, "Opening", 1, "Lead", 2026)
-        project_service.set_declaration(s, p, AssetCategory.TIMELINE, True)
-        project_service.set_metadata_field(s, p, "tags", "worship, gold")
-        project_service.toggle_assignment(s, p, 11, AssetCategory.ALL)
-        await project_service.provision_folders(s, p, drive, settings)
-        row = tracking.build_row(s, p, tz)
-        assert row[:5] == [str(p.id), "", "Opening", "Active", "2026"] and row[9] == "gold, worship" and row[11] == "Yes" and row[12] == "No"
-        assert row[15] == "Alice" and row[23] == p.drive_link
-        assert tracking.upsert_row(sheets, sheet_id, row) == "appended"
-        p.status = ProjectStatus.ARCHIVED
-        p.verified_by, p.verified_at = 1, p.created_at
-        s.flush()
-        assert tracking.upsert_row(sheets, sheet_id, tracking.build_row(s, p, tz)) == "updated"
-        values = sheets.get_values(sheet_id, "'Projects'!A:Y")
-        assert len(values) == 2 and values[1][3] == "Archived" and values[1][18] != ""
-        # rebuild rewrites everything from the database (drafts excluded)
-        project_service.create_draft(s, "Draft only", 1, "Lead", 2026)
-        assert tracking.rebuild(sheets, sheet_id, tracking.all_rows(s, tz)) == 1
-        assert [r[2] for r in sheets.get_values(sheet_id, "'Projects'!A:Y")[1:]] == ["Opening"]
-
-
 def test_memory_database_rejected():
     from mg_archive_bot.db import make_engine
 

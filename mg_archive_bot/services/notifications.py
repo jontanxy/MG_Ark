@@ -108,16 +108,6 @@ def archived_message(project: Project, verifier: User | None) -> str:
     return f"✅ <b>{esc(project.full_name)}</b> has been verified and archived{who}."
 
 
-def cancelled_message(project: Project, by: User | None, trashed: bool) -> str:
-    who = f" by {mention(by.telegram_id, by.display_name)}" if by else ""
-    folder = " Its Google Drive folder has been moved to the trash." if trashed else ""
-    return f"🗑 <b>{esc(project.full_name)}</b> has been cancelled{who}.{folder}"
-
-
-def restored_message(project: Project) -> str:
-    return f"♻️ <b>{esc(project.full_name)}</b> has been restored; its Drive folder is back and tracking has resumed."
-
-
 def reopened_message(project: Project) -> str:
     return f"🟢 <b>{esc(project.full_name)}</b> has been reopened for further uploads."
 
@@ -150,8 +140,6 @@ def project_details(project: Project, report: ValidationReport | None, tree: lis
         lines.append(f"<b>Assigned:</b> {_mentions(who)}")
     if creator:
         lines.append(f"<b>Created by:</b> {esc(creator.display_name)} · {esc(fmt_dt(project.created_at, tz))}")
-    if project.status == ProjectStatus.CANCELLED:
-        lines.append(f"<b>Cancelled:</b> {esc(fmt_dt(project.cancelled_at, tz))} — Drive folder in the trash")
     if report is not None:
         lines += ["", "<b>Latest check</b>"] + progress_block(project, report, tree) + [f"<i>{esc(fmt_dt(project.last_validated_at, tz))}</i>"]
     return "\n".join(lines)
