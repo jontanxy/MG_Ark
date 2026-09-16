@@ -73,7 +73,7 @@ def search_projects(session: Session, query: str, *, include_drafts: bool = Fals
     if not terms:
         return []
     whole = " ".join(terms)
-    stmt = select(Project).where(Project.status != ProjectStatus.CANCELLED)
+    stmt = select(Project)
     if not include_drafts:
         stmt = stmt.where(Project.status != ProjectStatus.DRAFT)
     hits: list[SearchHit] = []

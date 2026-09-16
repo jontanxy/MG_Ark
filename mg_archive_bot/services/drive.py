@@ -13,8 +13,6 @@ from typing import Protocol, runtime_checkable
 from ..config import Settings
 from ..constants import FOLDER_MIME
 
-SPREADSHEET_MIME = "application/vnd.google-apps.spreadsheet"
-
 log = logging.getLogger(__name__)
 
 DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive"]
@@ -37,7 +35,6 @@ class DriveFile:
     modified_time: str | None = None
     parents: tuple[str, ...] = ()
     drive_id: str | None = None  # id of the Shared Drive holding the file, if any
-    trashed: bool = False
 
     @property
     def is_folder(self) -> bool:
@@ -64,14 +61,12 @@ def file_link(file_id: str) -> str:
 @runtime_checkable
 class DriveClient(Protocol):
     def create_folder(self, name: str, parent_id: str) -> DriveFile: ...
-    def create_spreadsheet(self, name: str, parent_id: str) -> DriveFile: ...
     def find_child_folder(self, name: str, parent_id: str) -> DriveFile | None: ...
     def list_children(self, folder_id: str) -> list[DriveFile]: ...
     def get_file(self, file_id: str) -> DriveFile | None: ...
     def download(self, file_id: str, dest: Path, progress: Callable[[int, int | None], None] | None = None) -> Path: ...
     def upload(self, src: Path, parent_id: str, name: str, mime_type: str | None = None) -> DriveFile: ...
     def delete(self, file_id: str) -> None: ...
-    def restore(self, file_id: str) -> None: ...
 
 
 def _escape_query_value(value: str) -> str:
@@ -105,7 +100,7 @@ class GoogleDriveClient:
     managers on a Shared Drive may trash but not permanently delete).
     """
 
-    FIELDS = "id,name,mimeType,size,md5Checksum,modifiedTime,parents,driveId,trashed"
+    FIELDS = "id,name,mimeType,size,md5Checksum,modifiedTime,parents,driveId"
 
     def __init__(self, credentials) -> None:
         self._credentials = credentials
@@ -138,7 +133,6 @@ class GoogleDriveClient:
             modified_time=item.get("modifiedTime"),
             parents=tuple(item.get("parents") or ()),
             drive_id=item.get("driveId"),
-            trashed=bool(item.get("trashed", False)),
         )
 
     @staticmethod
@@ -175,11 +169,6 @@ class GoogleDriveClient:
 
     def create_folder(self, name: str, parent_id: str) -> DriveFile:
         body = {"name": name, "mimeType": FOLDER_MIME, "parents": [parent_id]}
-        item = self._run(self._service().files().create(body=body, fields=self.FIELDS, supportsAllDrives=True))
-        return self._to_file(item)
-
-    def create_spreadsheet(self, name: str, parent_id: str) -> DriveFile:
-        body = {"name": name, "mimeType": SPREADSHEET_MIME, "parents": [parent_id]}
         item = self._run(self._service().files().create(body=body, fields=self.FIELDS, supportsAllDrives=True))
         return self._to_file(item)
 
@@ -273,10 +262,6 @@ class GoogleDriveClient:
                 return
             raise
 
-    def restore(self, file_id: str) -> None:
-        """Take a file or folder back out of the trash."""
-        self._run(self._service().files().update(fileId=file_id, body={"trashed": False}, fields="id", supportsAllDrives=True))
-
 
 # --------------------------------------------------------------------------------------
 # In-memory fake (tests, and GOOGLE_AUTH_MODE=fake for trying the bot without Google)
@@ -288,7 +273,6 @@ class _Node:
     file: DriveFile
     content: bytes = b""
     children: list[str] = field(default_factory=list)
-    trashed: bool = False
 
 
 class InMemoryDriveClient:
@@ -356,43 +340,22 @@ class InMemoryDriveClient:
             self._nodes[parent_id].children.append(f.id)
         return f
 
-    def create_spreadsheet(self, name: str, parent_id: str) -> DriveFile:
-        self.calls.append(("create_spreadsheet", (name, parent_id)))
-        with self._lock:
-            if parent_id not in self._nodes:
-                raise DriveError(f"parent not found: {parent_id}")
-            f = DriveFile(f"sheet-{uuid.uuid4().hex[:8]}", name, SPREADSHEET_MIME, parents=(parent_id,))
-            self._nodes[f.id] = _Node(f)
-            self._nodes[parent_id].children.append(f.id)
-        return f
-
     def find_child_folder(self, name: str, parent_id: str) -> DriveFile | None:
         for child in self.list_children(parent_id):
             if child.is_folder and child.name == name:
                 return child
         return None
 
-    def _is_trashed(self, file_id: str) -> bool:
-        node = self._nodes.get(file_id)
-        while node is not None:
-            if node.trashed:
-                return True
-            node = self._nodes.get(node.file.parents[0]) if node.file.parents else None
-        return False
-
     def list_children(self, folder_id: str) -> list[DriveFile]:
         with self._lock:
             node = self._nodes.get(folder_id)
-            if node is None or self._is_trashed(folder_id):
+            if node is None:
                 raise DriveError(f"folder not found: {folder_id}")
-            return [self._nodes[c].file for c in node.children if c in self._nodes and not self._nodes[c].trashed]
+            return [self._nodes[c].file for c in node.children if c in self._nodes]
 
     def get_file(self, file_id: str) -> DriveFile | None:
         node = self._nodes.get(file_id)
-        if node is None:
-            return None
-        f = node.file
-        return DriveFile(f.id, f.name, f.mime_type, f.size, f.md5, f.modified_time, f.parents, f.drive_id, self._is_trashed(file_id))
+        return node.file if node else None
 
     def download(self, file_id: str, dest: Path, progress=None) -> Path:
         node = self._nodes.get(file_id)
@@ -409,18 +372,13 @@ class InMemoryDriveClient:
         return self.put_file(parent_id, name, content=data, mime_type=mime_type)
 
     def delete(self, file_id: str) -> None:
-        """Move to the trash (like the real client): hidden from listings, still retrievable via get_file."""
         with self._lock:
-            node = self._nodes.get(file_id)
+            node = self._nodes.pop(file_id, None)
             if node:
-                node.trashed = True
-
-    def restore(self, file_id: str) -> None:
-        with self._lock:
-            node = self._nodes.get(file_id)
-            if node is None:
-                raise DriveError(f"file not found: {file_id}")
-            node.trashed = False
+                for parent in node.file.parents:
+                    p = self._nodes.get(parent)
+                    if p and file_id in p.children:
+                        p.children.remove(file_id)
 
 
 def build_drive_client(settings: Settings) -> DriveClient:

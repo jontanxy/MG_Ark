@@ -65,16 +65,11 @@ class Settings(BaseSettings):
     reminder_min_gap_hours: int = 20
     timezone: str = ""  # IANA name; empty = host local timezone
 
-    # Project index (Google Sheet, one row per project)
-    tracking_sheet_enabled: bool = True
-    tracking_sheet_id: str = ""  # optional: use an existing spreadsheet; otherwise one is created in the archive root
-    tracking_sheet_title: str = "MG Archive Index"
-
     search_page_size: int = 5
     log_level: str = "INFO"
     log_file: Path | None = Path("data/bot.log")  # rotating log file; empty value disables
 
-    @field_validator("drive_root_folder_id", "tracking_sheet_id", mode="before")
+    @field_validator("drive_root_folder_id", mode="before")
     @classmethod
     def _strip(cls, v: object) -> object:
         return v.strip() if isinstance(v, str) else v

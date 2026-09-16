@@ -166,7 +166,7 @@ async def test_preview_planning_and_processing(db, settings, drive, fake_ffmpeg,
         old_drive_id = row.preview_drive_id
     # re-encoding replaces the old Drive preview
     res = process_preview(jobs[0], drive, settings, old_drive_id)
-    assert res.status == PreviewStatus.READY and drive.get_file(old_drive_id).trashed and res.preview_drive_id
+    assert res.status == PreviewStatus.READY and drive.get_file(old_drive_id) is None and res.preview_drive_id
     res_drive_id = res.preview_drive_id
     # failure path
     monkeypatch.setenv("FAKE_FFMPEG_FAIL", "1")
@@ -196,7 +196,7 @@ async def test_preview_planning_and_processing(db, settings, drive, fake_ffmpeg,
         plan_previews(s, p, result.source_files, orphans=orphans)
         assert p.previews == [] and [o.preview_drive_id for o in orphans] == [res_drive_id]
     remove_orphans(orphans, drive)
-    assert drive.get_file(res_drive_id).trashed
+    assert drive.get_file(res_drive_id) is None
 
 
 def test_process_preview_never_uses_drive_name_as_path(db, settings, drive, fake_ffmpeg, tmp_path):

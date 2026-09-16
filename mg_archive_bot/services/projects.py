@@ -12,7 +12,6 @@ from ..constants import (
     CATEGORY_FLAGS,
     CATEGORY_LABELS,
     METADATA_FIELDS,
-    REVOCABLE_STATUSES,
     AssetCategory,
     FolderSpec,
     ProjectStatus,
@@ -352,42 +351,6 @@ def verify_project(session: Session, project: Project, verified_by: int) -> Proj
     project.status = ProjectStatus.ARCHIVED
     project.verified_by = verified_by
     project.verified_at = utcnow()
-    session.flush()
-    return project
-
-
-async def revoke_project(session: Session, project: Project, drive: DriveClient, cancelled_by: int) -> bool:
-    """Cancel a project and move its Drive folder to the trash. Returns whether a folder was trashed.
-
-    Only projects that are not archived can be revoked; the folder is trashed *before* the status changes so a
-    Drive failure leaves the project untouched.
-    """
-    if project.status not in REVOCABLE_STATUSES:
-        raise ProjectError("Only active, incomplete or ready projects can be revoked (reopen an archived project first).")
-    trashed = False
-    if project.drive_root_id:
-        await asyncio.to_thread(drive.delete, project.drive_root_id)
-        trashed = True
-    for preview in list(project.previews):  # their files went to the trash with the folder
-        project.previews.remove(preview)
-        session.delete(preview)
-    project.status = ProjectStatus.CANCELLED
-    project.cancelled_by = cancelled_by
-    project.cancelled_at = utcnow()
-    project.last_complete = False
-    session.flush()
-    return trashed
-
-
-async def restore_project(session: Session, project: Project, drive: DriveClient) -> Project:
-    """Undo a revoke: take the folder out of the trash and make the project active again."""
-    if project.status != ProjectStatus.CANCELLED:
-        raise ProjectError("Only cancelled projects can be restored.")
-    if project.drive_root_id:
-        await asyncio.to_thread(drive.restore, project.drive_root_id)
-    project.status = ProjectStatus.ACTIVE
-    project.cancelled_by = None
-    project.cancelled_at = None
     session.flush()
     return project
 
