@@ -40,6 +40,9 @@ class FakeBot:
         self.commands: list[Any] = []
         self.fail_chats: set[int] = set()
         self.chat_titles: dict[int, str] = {}  # what get_chat reports; unknown ids raise like Telegram does
+        self.messages: dict[tuple[int, int], dict[str, Any]] = {}  # (chat_id, message_id) -> current text
+        self.edited: list[dict[str, Any]] = []
+        self.undeletable: set[tuple[int, int]] = set()  # e.g. messages older than 48 h
 
     async def send_message(self, chat_id, text, reply_markup=None, **kwargs):
         from telegram.error import Forbidden
@@ -47,8 +50,21 @@ class FakeBot:
         if chat_id in self.fail_chats:
             raise Forbidden("bot was kicked")
         msg = FakeMessage(self, FakeChat(chat_id, "private" if chat_id > 0 else "supergroup"), text=text, reply_markup=reply_markup)
-        self.sent.append({"chat_id": chat_id, "text": text, "reply_markup": reply_markup})
+        self.sent.append({"chat_id": chat_id, "text": text, "reply_markup": reply_markup, "message_id": msg.message_id})
+        self.messages[(chat_id, msg.message_id)] = {"text": text}
         return msg
+
+    async def edit_message_text(self, text, chat_id=None, message_id=None, reply_markup=None, **kwargs):
+        from telegram.error import BadRequest
+
+        key = (chat_id, message_id)
+        if key not in self.messages:
+            raise BadRequest("Message to edit not found")
+        if self.messages[key]["text"] == text:
+            raise BadRequest("Message is not modified")
+        self.messages[key]["text"] = text
+        self.edited.append({"chat_id": chat_id, "message_id": message_id, "text": text})
+        return True
 
     async def send_video(self, chat_id, video, caption=None, **kwargs):
         data = video.read() if hasattr(video, "read") else video
@@ -60,7 +76,12 @@ class FakeBot:
         return True
 
     async def delete_message(self, chat_id, message_id):
+        from telegram.error import BadRequest
+
+        if (chat_id, message_id) in self.undeletable:
+            raise BadRequest("Message can't be deleted")
         self.deleted.append((chat_id, message_id))
+        self.messages.pop((chat_id, message_id), None)
         return True
 
     async def get_me(self):

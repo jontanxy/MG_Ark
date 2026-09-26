@@ -183,6 +183,10 @@ On first start the access password is seeded from `INITIAL_ACCESS_PASSWORD`; aft
   (recursively, 3 levels). A leaf is satisfied when it contains at least one file. Required leaves are
   `Working File/Fonts`, `Working File/AE` (always) and, only if declared, `Timeline/ProRes 4444`, `Timeline/Hap/Hap Alpha`,
   `Contin Videos/ProRes 4444`, `Contin Videos/Hap/Hap Alpha`, `Contin Lyrics/PNG`, `Working File/PSD`.
+* Each project has **one live status message** in its MG Group. Background scans and "Check progress" edit it in
+  place (silently, no notification); `/status` moves it to the bottom of the chat with fresh numbers instead of
+  posting another copy. The bot never creates that message on its own — the first `/status` does. Reminders and the
+  ready/archived notices are separate messages because they are meant to notify people.
 * When everything declared is present the project becomes **READY_FOR_VERIFICATION** and the MG Group is told once.
   A Team Lead then presses **Verify & archive** → **ARCHIVED** (announced). Removing files later makes it INCOMPLETE again.
 * Reminders go out daily at `REMINDER_HOUR` (in `TIMEZONE`) for INCOMPLETE projects, at most once per

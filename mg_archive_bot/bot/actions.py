@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 from dataclasses import dataclass
 
@@ -18,7 +19,7 @@ from ..services import notifications
 from ..services import tracking
 from ..services.previews import PreviewJob, PreviewOrphan, plan_previews, remove_orphans
 from ..services.sheets import spreadsheet_url
-from ..services.validation import ScanResult, validate_project
+from ..services.validation import ScanResult, latest_report, validate_project
 from ..util import esc, human_size
 from .access import drive_of, project_lock, settings_of
 
@@ -29,35 +30,121 @@ def tree_of(context: ContextTypes.DEFAULT_TYPE):
     return build_folder_tree(settings_of(context).folder_names())
 
 
-async def post_to_group(context: ContextTypes.DEFAULT_TYPE, chat_id: int | None, text: str) -> bool:
-    """Send *text* to an MG group. Returns False (and logs) when the bot cannot post there."""
+async def send_to_group(context: ContextTypes.DEFAULT_TYPE, chat_id: int | None, text: str):
+    """Send *text* to an authorised MG group. Returns (message, chat id actually used) or (None, None)."""
     if chat_id is None:
-        return False
+        return None, None
     with session_scope() as session:
         authorised = group_service.is_group_authorised(session, chat_id)
     if not authorised:
         log.info("Not posting to chat %s: not an authorised MG Group", chat_id)
-        return False
+        return None, None
     try:
-        await context.bot.send_message(chat_id, text)
-        return True
+        return await context.bot.send_message(chat_id, text), chat_id
     except ChatMigrated as exc:
         new_id = exc.new_chat_id
         log.info("Group %s migrated to %s; updating records", chat_id, new_id)
         with session_scope() as session:
             group_service.migrate_group(session, chat_id, new_id)
         try:
-            await context.bot.send_message(new_id, text)
-            return True
+            return await context.bot.send_message(new_id, text), new_id
         except TelegramError as exc2:
             log.warning("Cannot post to migrated group %s: %s", new_id, exc2)
-            return False
+            return None, None
     except (Forbidden, BadRequest) as exc:
         log.warning("Cannot post to group %s: %s", chat_id, exc)
-        return False
+        return None, None
     except TelegramError as exc:  # pragma: no cover - network
         log.warning("Telegram error posting to group %s: %s", chat_id, exc)
+        return None, None
+
+
+async def post_to_group(context: ContextTypes.DEFAULT_TYPE, chat_id: int | None, text: str) -> bool:
+    """Send *text* to an MG group. Returns False (and logs) when the bot cannot post there."""
+    message, _ = await send_to_group(context, chat_id, text)
+    return message is not None
+
+
+# ----------------------------------------------------------------------------------------
+# Live status message: one progress message per project in its MG Group, edited in place
+# ----------------------------------------------------------------------------------------
+
+OUTDATED_STATUS = "📊 <i>Outdated — see the latest status message below.</i>"
+
+
+def _digest(text: str) -> str:
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()[:20]
+
+
+def live_status_text(context: ContextTypes.DEFAULT_TYPE, project: Project, report) -> str:
+    return notifications.progress_message(project, report, tree_of(context), context.bot_data["tz"])
+
+
+async def refresh_live_status(
+    context: ContextTypes.DEFAULT_TYPE, session: Session, project: Project, text: str, *, repost: bool = False
+) -> bool:
+    """Keep the project's live status message current.
+
+    * ``repost=False`` (scans, private checks, state changes): silently edit the existing message in place.
+      Nothing is ever *created* this way, so background work never adds messages to the chat.
+    * ``repost=True`` (``/status``): move the message to the bottom of the chat with fresh content — the old
+      copy is deleted, or marked outdated when Telegram no longer allows deleting it (older than 48 h).
+    Returns True when a message was edited or sent.
+    """
+    chat_id = project.mg_group_chat_id
+    if chat_id is None:
         return False
+    if not group_service.is_group_authorised(session, chat_id):
+        return False
+    digest = _digest(text)
+    message_id = project.status_message_id
+    if not repost:
+        if message_id is None or project.status_message_hash == digest:
+            return False
+        try:
+            await context.bot.edit_message_text(text, chat_id=chat_id, message_id=message_id)
+        except BadRequest as exc:
+            if "not modified" in str(exc).lower():
+                project.status_message_hash = digest
+                session.commit()
+                return False
+            # Deleted by a group admin, or otherwise gone: forget it; the next /status re-creates it.
+            log.info("Live status %s/%s could not be edited (%s)", chat_id, message_id, exc)
+            project.status_message_id = None
+            project.status_message_hash = None
+            session.commit()
+            return False
+        except TelegramError as exc:  # pragma: no cover - network
+            log.warning("Live status edit failed for %s: %s", project.full_name, exc)
+            return False
+        project.status_message_hash = digest
+        session.commit()
+        return True
+    if message_id is not None:
+        try:
+            await context.bot.delete_message(chat_id, message_id)
+        except TelegramError:
+            try:
+                await context.bot.edit_message_text(OUTDATED_STATUS, chat_id=chat_id, message_id=message_id)
+            except TelegramError:
+                pass
+    message, used_chat = await send_to_group(context, chat_id, text)
+    if message is None:
+        return False
+    if used_chat != chat_id:
+        project.mg_group_chat_id = used_chat
+    project.status_message_id = message.message_id
+    project.status_message_hash = digest
+    session.commit()
+    return True
+
+
+async def refresh_live_status_from_latest(context: ContextTypes.DEFAULT_TYPE, session: Session, project: Project) -> bool:
+    """After verify / reopen / restore / revoke: reflect the new state in the live message (if there is one)."""
+    report = latest_report(session, project)
+    if report is None:
+        return False
+    return await refresh_live_status(context, session, project, live_status_text(context, project, report))
 
 
 async def notify_user(context: ContextTypes.DEFAULT_TYPE, user_id: int | None, text: str) -> None:
@@ -84,8 +171,13 @@ async def check_project(
     requested_by: int | None,
     queue_previews: bool = True,
     force_previews: bool = False,
+    live: str = "edit",
 ) -> CheckOutcome:
-    """Validate a project against Drive, transition its status, notify the group on READY, queue previews."""
+    """Validate a project against Drive, transition its status, notify the group on READY, queue previews.
+
+    ``live`` controls the group's live status message: "edit" refreshes it in place (silent), "repost" moves it
+    to the bottom of the chat (used by /status), "skip" leaves it alone.
+    """
     settings = settings_of(context)
     drive = drive_of(context)
     orphans: list[PreviewOrphan] = []
@@ -101,6 +193,8 @@ async def check_project(
         schedule_sheet_sync(context, project.id)
     if orphans:
         await asyncio.to_thread(remove_orphans, orphans, drive)
+    if live != "skip" and not result.report.had_errors:
+        await refresh_live_status(context, session, project, live_status_text(context, project, result.report), repost=live == "repost")
     if result.became_ready:
         outcome.group_notified = await post_to_group(context, project.mg_group_chat_id, notifications.ready_message(project))
         if requested_by != project.created_by:

@@ -69,6 +69,9 @@ def progress_block(project: Project, report: ValidationReport, tree: list[Folder
 
 def progress_message(project: Project, report: ValidationReport, tree: list[FolderSpec], tz: tzinfo) -> str:
     lines = [f"📊 <b>{esc(project.full_name)}</b> — {status_line(project)}", ""]
+    if project.status == ProjectStatus.CANCELLED:
+        lines.append("🗑 Project cancelled — its Google Drive folder was moved to the trash.")
+        return "\n".join(lines)
     lines += progress_block(project, report, tree, with_links=True)
     missing = report.missing
     lines.append("")

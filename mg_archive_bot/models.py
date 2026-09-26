@@ -179,6 +179,9 @@ class Project(Base):
     verified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     cancelled_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
     cancelled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # The single "live" progress message in the MG Group, edited in place by scans (see actions.refresh_live_status).
+    status_message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    status_message_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     tags: Mapped[list[Tag]] = relationship(Tag, secondary="project_tags", lazy="selectin", order_by=Tag.name)
     collection_folder: Mapped[Collection | None] = relationship(Collection, lazy="joined")

@@ -408,6 +408,9 @@ def set_group(session: Session, project: Project, chat_id: int | None) -> None:
 
     if chat_id is not None and not is_group_authorised(session, chat_id):
         raise ProjectError("That chat is not an authorised MG Group.")
+    if chat_id != project.mg_group_chat_id:
+        project.status_message_id = None  # the live status message belongs to the old chat
+        project.status_message_hash = None
     project.mg_group_chat_id = chat_id
     session.flush()
 

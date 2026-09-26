@@ -14,7 +14,7 @@ from ...services import projects as project_service
 from ...util import esc
 from ...services.validation import latest_report
 from ..access import limiter, require, settings_of
-from ..actions import check_project, tree_of
+from ..actions import check_project, live_status_text, refresh_live_status, tree_of
 
 log = logging.getLogger(__name__)
 
@@ -34,12 +34,16 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE, actor: 
         if len(projects) > MAX_PER_STATUS:
             await update.message.reply_text(f"{len(projects)} open archives — showing the {MAX_PER_STATUS} most recent.")
         # One Drive scan per group per cooldown window; repeated /status re-uses the stored result.
+        # Either way the project's live status message is moved to the bottom of the chat, not duplicated.
         fresh = limiter(context, "group_status", 1, settings_of(context).status_cooldown_seconds).allow(chat_id)
         for project in projects[:MAX_PER_STATUS]:
             report = None if fresh else latest_report(session, project)
             if report is None:
-                report = (await check_project(context, session, project, requested_by=actor.telegram_id)).result.report
-            await update.message.reply_text(notifications.progress_message(project, report, tree_of(context), tz))
+                report = (await check_project(context, session, project, requested_by=actor.telegram_id, live="repost")).result.report
+            else:
+                await refresh_live_status(context, session, project, live_status_text(context, project, report), repost=True)
+            if report.had_errors:  # never stored as the live message: the last good state stays
+                await update.message.reply_text(notifications.progress_message(project, report, tree_of(context), tz))
 
 
 @require(Role.TEAM_LEAD, scope="group")
