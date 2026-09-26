@@ -56,7 +56,7 @@ This is the single most important idea in the manual. The bot behaves differentl
 | Where | What it is for | What works there |
 |---|---|---|
 | **Private chat with the bot** | Your own workspace. Nobody else sees it. | Searching, previews, creating archives, managing archives, administration |
-| **The MG Group** | The shared Motion Graphics group chat. | Archive announcements, progress, reminders. Three commands only |
+| **The MG Group** | The shared Motion Graphics group chat. | Archive announcements, progress, reminders. Four commands only |
 {widths:24,38,38}
 
 Searching and project management are blocked inside the group on purpose. If everyone searched in the group
@@ -70,6 +70,7 @@ There are three roles. Everyone starts as a Designer.
 | You can | Designer | Team Lead | Super Admin |
 |---|---|---|---|
 | Search the archive, watch previews, open archives | Yes | Yes | Yes |
+| List the files in an archive | Yes | Yes | Yes |
 | Create archives and manage them | No | Yes | Yes |
 | Assign designers and verify finished archives | No | Yes | Yes |
 | Create a new MG Group | No | Yes | Yes |
@@ -211,6 +212,7 @@ Easter Opening 2026
 3 previews available - Archived
 
 [ Preview ]   [ Open Archive ]   [ Details ]
+[ Files ]
 ```
 
 | Part of the card | What it tells you |
@@ -219,6 +221,7 @@ Easter Opening 2026
 | The words with a hash | The tags someone gave the project. These are the best search words |
 | `3 previews available` | How many short preview videos you can watch straight away |
 | `Archived` | The state of the archive. `Archived` means it is finished and verified |
+| The four buttons | Watch a preview, open the folder in Google Drive, read the full record, or list every file in the archive |
 {widths:30,70}
 
 ## Watching a preview
@@ -240,6 +243,37 @@ Tap **Open Archive**. Google Drive opens at the project folder and you can brows
 
 If Google Drive says you do not have access, the archive folder has not been shared with your Google
 account. Ask your Team Lead. The bot does not control who can open Drive folders.
+
+## Seeing what is in the archive
+
+Tap **Files**. The bot reads Google Drive and replies with the contents of the whole project,
+folder by folder:
+
+```
+Easter Opening 2026 - 9 files - 4.2 GB
+Open project folder
+
+Working File (3)
+  Fonts (2)
+    Gotham-Bold.otf - 412 KB
+    Gotham-Book.otf - 398 KB
+  AE (1)
+    Easter_Opening_v4.aep - 88.1 MB
+Final Render (6)
+  Timeline (6)
+    ProRes 4444 (3)
+      Easter_Opening.mov - 2.1 GB
+      ...
+```
+
+Every folder name and every file name is a link. Tap a folder to open it in Google Drive, or tap a
+file to open the file itself.
+
+This is the quickest way to answer "what is actually in there" without leaving Telegram. It is also
+how you check that the file you uploaded is the one you meant to upload, because the size is shown
+next to every name.
+
+> If the archive is large, the bot sends the listing in several numbered messages. That is normal.
 
 ## Seeing all the details
 
@@ -376,6 +410,19 @@ Every folder name is a link. Tap the one you are responsible for and upload.
 
 > If you see **could not check Google Drive** next to a folder, there is a temporary problem reaching
 > Google. Nothing is wrong with your upload and nothing has been marked against you. Try again later.
+
+## Checking what you have uploaded
+
+Send `/files` **inside the MG Group**. The bot reads Google Drive and lists what is actually in each
+folder, with the size of every file.
+
+Use it to answer three questions quickly:
+
+- Did my upload arrive at all?
+- Did it land in the right folder?
+- Is it the right file, or did I upload the draft by mistake? The size usually tells you.
+
+Every name in the listing is a link, so you can tap straight through to a folder or a file.
 
 ## Reminders
 
@@ -519,8 +566,14 @@ Which MG Group should receive announcements and progress?
 [ No group (announce later) ]
 ```
 
-This step is skipped if only one group is authorised, because the bot picks it for you. If no group has
-been authorised yet, the bot tells you and you can link one later.
+The bot always asks, even when only one group is authorised. This is deliberate: when a ministry runs
+several groups, it is far too easy to announce a project in the wrong chat, and a single tap is a
+small price for being certain. The group you pick is shown again on the confirmation screen before
+anything is created.
+
+If the group you want is not in the list, it has not been authorised yet. Chapter 8 explains how to
+authorise one. You can also choose **No group (announce later)** and link it afterwards from the
+project menu.
 
 ### Step 6: Add the search information
 
@@ -634,6 +687,7 @@ Tapping a project shows its full record followed by these buttons.
 | Button | What it does |
 |---|---|
 | **Check progress** | Looks at Google Drive right now and shows what is there and what is missing |
+| **Files** | Lists everything in the project folder, folder by folder, with file sizes |
 | **Details** | Shows the full record again |
 | **Announce** | Posts the archive request into the MG Group again |
 | **Remind** | Checks Drive, then posts a reminder listing only what is missing |
@@ -663,6 +717,17 @@ Use this before a deadline, or whenever someone tells you they have uploaded.
 
 If the reply says Google Drive could not be checked, nothing has changed and nothing has been recorded.
 Wait and try again.
+
+## Files
+
+Tap **Files**. The bot reads the project's Google Drive folder and lists its full contents, folder by
+folder, with the size of every file and a link to each one.
+
+**Check progress** tells you whether a folder has something in it. **Files** tells you what that
+something is. Use **Files** before you verify an archive: it is how you catch a placeholder file, a
+draft uploaded by mistake, or a render that is suspiciously small.
+
+Large archives arrive as several numbered messages.
 
 ## Announce and Remind
 
@@ -915,18 +980,39 @@ Use /status any time.
 | Post | When |
 |---|---|
 | Archive announcement | A new archive is created, or a Team Lead taps **Announce** |
-| Progress | Somebody sends `/status` |
+| Progress | One message per project that updates itself. See below |
 | Reminder | Once a day for anything incomplete, or when a Team Lead taps **Remind** |
 | Ready for verification | Everything declared has arrived. Posted once |
 | Archived | A Team Lead has verified the archive |
 | Cancelled or restored | A project was revoked or brought back |
 {widths:30,70}
 
-## The three commands
+## The progress message updates itself
+
+Each archive has **one** progress message in the group, and the bot keeps it up to date rather than
+posting a new one every time something changes. When a file is uploaded, the numbers in that existing
+message change by themselves. The group does not fill up with near identical progress reports.
+
+Two things follow from this, and both surprise people at first.
+
+1. **You will not get a notification when progress changes.** Editing a message is silent. If you
+   want the current state in front of you, send `/status`.
+2. **`/status` does not create a second message.** It moves the existing one to the bottom of the
+   chat with fresh numbers, and removes the old copy. If the old copy is more than two days old,
+   Telegram will not let the bot delete it, so it is relabelled as outdated instead.
+
+The very first `/status` in a group is what creates the message. Until somebody asks, the bot posts
+no progress at all. If the message is ever deleted, send `/status` again and it comes back.
+
+Reminders, and the notices that an archive is ready, archived or cancelled, are always sent as new
+messages. Those are meant to get your attention, so they are never quiet edits.
+
+## The four commands
 
 | Command | Who can use it | What it does |
 |---|---|---|
-| `/status` | Everyone | Shows the progress of this group's open archives, after a fresh check |
+| `/status` | Everyone | Brings this group's progress messages to the bottom of the chat with fresh numbers |
+| `/files` | Everyone | Lists what has actually been uploaded for this group's archives, folder by folder |
 | `/remind` | Team Lead | Checks Drive and posts a reminder for anything missing |
 | `/help` | Everyone | Lists these commands |
 {widths:16,20,64}
@@ -1036,6 +1122,7 @@ The bot sends you a private message when something needs your attention.
 
 | Alert | What it means | What to do |
 |---|---|---|
+| New user registered | Somebody used the access password and now has an account. Their name, handle and Telegram ID are included, with buttons to make them a Team Lead or open their card | If you do not recognise the name, the password has spread further than it should have. Revoke the account in `/users` and change the password |
 | Login lockout | Somebody entered the password wrongly five times. Their name and Telegram ID are included | If you recognise them, tell them the correct password. If you do not, consider changing the password |
 | Registration paused | Thirty wrong attempts across all accounts within ten minutes. Registration is paused automatically for fifteen minutes | This is the sign of a guessing attempt. Change the password with `/setpassword` |
 | Project index could not be updated | The Google Sheet could not be written | The bot keeps working. Once the cause is fixed, ask a Team Lead to send `/sheet rebuild` |
@@ -1068,7 +1155,8 @@ The bot sends you a private message when something needs your attention.
 
 | Command | Who | What it does |
 |---|---|---|
-| `/status` | Everyone | Progress of this group's open archives |
+| `/status` | Everyone | Bring this group's progress messages to the bottom, with fresh numbers |
+| `/files` | Everyone | List what has been uploaded, folder by folder |
 | `/remind` | Team Lead | Post reminders for missing uploads |
 | `/activate MG-XXXX-XXXX` | Team Lead | Authorise this group |
 | `/help` | Everyone | List the group commands |
@@ -1136,6 +1224,19 @@ ProRes 4444 folders in Timeline and Contin Videos.
 **A preview will not play.**
 The preview opens in Google Drive, so your Google account needs access to the archive folder. Ask your
 Team Lead to check the sharing.
+
+**The progress message in the group has not changed for hours.**
+It only changes when something on Google Drive changes. The bot edits it quietly, without a
+notification, so it is easy to miss an update. Send `/status` to bring it to the bottom of the chat
+with the current numbers.
+
+**Nothing at all has been posted in the group for this archive.**
+The progress message is created by the first `/status` anybody sends in that group. Until then the
+bot stays quiet on purpose. Send `/status`.
+
+**I want to know exactly which files are in an archive.**
+Send `/files` in the MG Group, or tap **Files** on a search result or in the project menu. You get
+the full contents folder by folder, with the size of every file.
 
 **A command works for my colleague but not for me.**
 It needs a higher role. Send `/whoami` to see your role and ask the Super Admin if you need it changed.

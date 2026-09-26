@@ -58,8 +58,9 @@ are published separately in the *User Manual*.
 
 | Version | Date | Author | Summary |
 |---|---|---|---|
-| 1.0.0 | 18 September 2026 | Development Team | First released edition covering the complete 1.0.0 feature set |
-{widths:12,18,25,45}
+| 1.0 | 18 September 2026 | Development Team | First released edition covering the complete 1.0.0 feature set |
+| 1.1 | 26 September 2026 | Development Team | Adds the file listing subsystem, the live status message, the group name synchronisation, the registration notice and the password reset tool |
+{widths:10,18,22,50}
 
 # System overview
 
@@ -153,7 +154,7 @@ asyncio event loop.
 | Activity | Implementation | Responsibility |
 |---|---|---|
 | Update processing | `python-telegram-bot` application with concurrent updates enabled | Commands, button presses, membership changes |
-| Scheduled jobs | The library's job queue, backed by APScheduler | Drive scans, daily reminders, nightly index rebuild, stale chat eviction |
+| Scheduled jobs | The library's job queue, backed by APScheduler | Drive scans, daily reminders, nightly index rebuild, group name refresh, stale chat eviction |
 | Preview worker | A single background asyncio task consuming a queue | Serialised download, transcode and upload of previews |
 {widths:22,34,44}
 
@@ -195,6 +196,7 @@ mg_archive_bot/
     projects.py        creation, provisioning, metadata, assignments, transitions
     validation.py      the scan algorithm, reports and status transitions
     previews.py        preview planning, transcoding, upload and bookkeeping
+    listing.py         folder by folder reading of a project's Drive folder
     search.py          normalisation, conjunctive matching, ranking
     tracking.py        the project index sheet layout and synchronisation
     notifications.py   message builders for private replies and group posts
@@ -209,6 +211,7 @@ mg_archive_bot/
   tools/
     drive_check.py     diagnostic for Drive access and sharing
     google_oauth.py    one time OAuth token bootstrap
+    reset_password.py  set the access password and clear login lockouts
 ```
 
 The dependency direction is strict: `bot` depends on `services`, and `services` never imports from `bot`.
@@ -293,6 +296,7 @@ The `projects` table carries five groups of columns.
 | Declarations | `has_timeline`, `has_contin_videos`, `has_contin_lyrics`, `has_psd` | These four flags drive folder creation, validation and preview sourcing |
 | Metadata | `collection`, `event`, `ministry`, `style`, `colours`, `year`, `creator`, `asset_types`, `description` | Free text used by discovery; free text fields are capped at 200 characters and the description at 2000 |
 | Drive linkage | `drive_root_id`, `drive_link` | Populated when the tree is provisioned |
+| Live status message | `status_message_id`, `status_message_hash` | Identify the single progress message the bot maintains in the MG Group, and the digest of its current text so an unchanged message is never rewritten |
 | Audit | `created_by`, `created_at`, `activated_at`, `last_validated_at`, `last_complete`, `last_reminder_at`, `verified_by`, `verified_at`, `cancelled_by`, `cancelled_at` | Supports the lifecycle, the reminder interval and the index sheet |
 {widths:16,40,44}
 
@@ -618,6 +622,54 @@ in the Google Drive player. The multi gigabyte master is never opened, nothing i
 there is no file size ceiling to manage. If a preview is requested before it is ready, the reply states the
 current status instead.
 
+# File listing
+
+## Purpose
+
+Progress reporting answers whether a required folder holds at least one file. It deliberately says
+nothing about *which* files those are. The listing subsystem answers the second question: it reads a
+project's Drive folder in full and renders it, folder by folder, as a set of Telegram messages in
+which every folder and every file is a link.
+
+It is used for three things: a Team Lead confirming that what arrived is what was asked for, a
+designer checking their own upload without opening Drive, and anyone inspecting a past archive found
+through search.
+
+## Reading the tree
+
+`services/listing.py` builds an in-memory tree of `FolderEntry` and `FileEntry` records. The read is
+blocking and runs in a worker thread.
+
+| Aspect | Behaviour |
+|---|---|
+| Depth | Six levels below the project folder, which allows three levels of designer sub-folders beneath a leaf such as `Working File / Fonts`. Anything deeper is reported as not shown rather than silently omitted |
+| Ordering | Folders the bot created keep their archive order, so the tree reads in the same sequence as the specification; every other folder is alphabetical, as are files |
+| Exclusions | The same junk filter the validator uses, so operating system metadata and zero byte files are left out of both counts and listings |
+| Counts | Each folder shows the total number of files beneath it, including its sub-folders, or is marked empty |
+| Failures | A folder that cannot be listed is marked individually and the rest of the tree is still rendered. One unreadable folder never costs the whole listing |
+{widths:16,84}
+
+## Rendering
+
+`render_listing` turns the tree into Telegram HTML. The header carries the project name, the total
+file count and the summed size, and links to the project folder. Sizes are formatted per file, and
+every name is a link: a folder opens in Drive, a file opens in Drive's viewer.
+
+Telegram caps a message at 4096 characters after parsing, so output is split at 3500 raw characters
+and the parts are numbered. Splitting happens between lines, so a file entry is never cut in half.
+
+## Entry points
+
+| Entry point | Who | Scope |
+|---|---|---|
+| Project menu, **Files** | Team Lead | One project |
+| Search result card, **Files** | Everyone | One project, including archived ones |
+| `/files` in an MG Group | Everyone in that group | The group's open archives, up to six, most recent first |
+{widths:34,22,44}
+
+Nothing is cached. Each invocation reads Drive again, which is the point: the listing is a statement
+about the archive now, not about the last scan.
+
 # Discovery and ranking
 
 ## Query normalisation
@@ -736,7 +788,8 @@ directing the user to a private chat, which is what keeps the shared channel rea
 
 | Group command | Minimum role | Function |
 |---|---|---|
-| `/status` | Designer | Progress of this group's open archives |
+| `/status` | Designer | Bring this group's live progress messages to the bottom of the chat with fresh figures |
+| `/files` | Designer | List, folder by folder, what has been uploaded for this group's open archives |
 | `/remind` | Team Lead | Post reminders for missing uploads |
 | `/activate <token>` | Team Lead | Authorise this group with a provisioning token |
 | `/help` | None | List the group commands |
@@ -781,6 +834,47 @@ basis as soon as it has been read, so the secret does not remain in the chat his
 All outgoing messages use Telegram's HTML parse mode. Every interpolated value passes through an escaping
 helper, and link previews are disabled so that a Drive link does not expand into a large card. Designer
 mentions use the `tg://user` form, which works even for people who have no public username.
+
+## The live status message
+
+A naive implementation posts a fresh progress message every time a scan runs. At a thirty minute
+interval across a handful of open projects, that buries the MG Group in near identical messages and
+trains people to ignore it.
+
+Instead each project owns exactly one progress message in its group, identified by
+`status_message_id`, and the bot edits that message in place.
+
+| Trigger | Behaviour |
+|---|---|
+| Scheduled scan, private **Check progress**, and the verify, reopen, restore and revoke transitions | Edit the existing message silently. Nothing is created, so background work never adds to the chat |
+| `/status` | Move the message to the bottom of the chat with current figures. The previous copy is deleted, or relabelled as outdated when Telegram no longer permits deleting it, which is 48 hours |
+| Reminders, and the ready, archived and cancelled notices | Posted as separate messages, because their purpose is to notify people rather than to record state |
+{widths:34,66}
+
+Three properties follow from the design and are worth stating because each was a deliberate choice.
+
+1. **The bot never creates the message by itself.** The first `/status` in a group creates it. A
+   group that nobody has asked for status in therefore receives no progress traffic at all.
+2. **An unchanged message is never rewritten.** `status_message_hash` holds a digest of the rendered
+   text, and an edit that would produce the same text is skipped, which avoids both the API call and
+   the "edited" marker appearing on a message that did not change.
+3. **Losing the message is harmless.** If a group administrator deletes it, the next edit fails, the
+   stored identifier is cleared and scans fall silent again until the next `/status` re-creates it.
+   Relinking a project to a different group clears it for the same reason.
+
+A scan whose report carried Drive errors never becomes the live message, so the last known good
+state stays on display. In that case `/status` replies with a separate warning instead.
+
+## Group identity and renaming
+
+A Telegram group's name can change at any time, and a stale name in the project menu or the index
+sheet is a small but persistent annoyance. The stored name is kept current from three directions:
+
+- A `new_chat_title` service message updates it immediately.
+- Every group command carries the chat's current name, and the authorisation gate writes it through
+  on the way past, so ordinary use keeps it fresh at no extra cost.
+- A job every six hours, first run 30 seconds after start, asks Telegram for each authorised group's
+  name. This is the only path that catches a rename made while the bot was stopped.
 
 ## Chat migration
 
@@ -849,6 +943,18 @@ an authorised user in an unauthorised group is denied.
 5. A group revoked deliberately by the Super Admin cannot be re-activated with a Team Lead's token; only
    the Super Admin can restore it. A group the bot was merely removed from can be re-activated normally.
    The distinction is recorded in the group row, so a deliberate revocation cannot be worked around.
+
+## Visibility of registrations
+
+Access is granted by a shared password, so the Super Admin cannot see who used it unless the system
+tells them. Every successful registration therefore produces a direct message naming the person,
+their Telegram handle if they have one, their numeric identifier and the role they were given, with
+two buttons that promote them to Team Lead or open their user card directly.
+
+The control this provides is practical rather than theoretical: an unexpected name arriving is the
+signal that the password has spread beyond the ministry, and the response, revoking that account and
+rotating the password, is two taps away from the notice itself. The Super Admin's own registration
+is not announced to them.
 
 ## Abuse controls
 
@@ -1012,6 +1118,33 @@ volumes, with the database and working directory pointed inside the data volume.
 docker compose up -d --build
 ```
 
+## Operator tools
+
+Three tools run outside the bot process and are invoked with `python -m`.
+
+| Tool | Purpose |
+|---|---|
+| `mg_archive_bot.tools.drive_check` | Report which Google identity the bot uses, whether the archive root is visible, whether it lives in a Shared Drive and whether folders can be created there, naming the exact permission to request when something is missing |
+| `mg_archive_bot.tools.google_oauth` | One time bootstrap of an OAuth token, for the authentication mode that uses a normal Google account |
+| `mg_archive_bot.tools.reset_password` | Set the access password without going through Telegram, and clear every login lockout |
+{widths:34,66}
+
+The password reset tool exists because of a trap in the configuration. `INITIAL_ACCESS_PASSWORD` is
+read exactly once, when the database is first created; editing it in the environment file afterwards
+changes nothing, which is not obvious and has surprised operators. It also covers the case where the
+Super Admin cannot reach Telegram, or where everyone is locked out at once.
+
+```
+python -m mg_archive_bot.tools.reset_password             # take the password from INITIAL_ACCESS_PASSWORD
+python -m mg_archive_bot.tools.reset_password --prompt    # type it, twice, without it being echoed
+```
+
+It rewrites the stored hash and deletes every row in `login_attempts`, so outstanding lockouts end
+immediately. Registered users keep their access: the password governs new registrations only, which
+means the tool is not a way to remove anybody. Revocation in `/users` remains the only way to do
+that. The tool exits non zero and changes nothing when the two prompted entries differ, or when the
+environment variable it was told to use is empty.
+
 ## Startup sequence
 
 1. Settings are loaded and validated; a configuration error exits with status 2 and a precise message.
@@ -1032,6 +1165,7 @@ docker compose up -d --build
 | `scan` | Every `SCAN_INTERVAL_MINUTES`, first run after two minutes | Validate all open projects and queue previews |
 | `reminders` | Daily at `REMINDER_HOUR` | Post outstanding items into each MG Group |
 | `leave-stale-chats` | Every ten minutes, first run after five | Leave chats that were never authorised |
+| `refresh-group-titles` | Every six hours, first run 30 seconds after start | Ask Telegram for each authorised group's current name, which catches renames made while the bot was stopped |
 | `rebuild-sheet` | Daily at 03:30 | Rewrite the project index from the database |
 {widths:20,32,48}
 
@@ -1066,6 +1200,9 @@ what is actually on Drive, and the nightly job repairs the index sheet.
 | Reminders arrive at the wrong hour | The timezone is unset or wrong | Set `TIMEZONE` to the correct IANA zone and restart |
 | The index sheet stops updating | The Sheets API is disabled, or permissions changed | Enable the API or repair access, then run `/sheet rebuild` |
 | A preview never appears | The job failed and is not retried automatically | Open the project menu and request generation, which forces a retry |
+| Nobody knows the access password, or everyone is locked out | The password was never recorded, or a guessing attempt locked the accounts | Run `python -m mg_archive_bot.tools.reset_password --prompt` on the host. Editing `INITIAL_ACCESS_PASSWORD` has no effect on an existing database |
+| The progress message in a group stopped updating | It was deleted in the group, so the bot forgot it | Send `/status` in that group; the message is created again and scans resume editing it |
+| A group shows an old name | The group was renamed while the bot was stopped | It corrects itself within six hours, or immediately on the next command sent in that group |
 {widths:30,26,44}
 
 The first diagnostic step for any unexplained behaviour is the log:
@@ -1098,11 +1235,11 @@ exercised without invoking a real one. Every test runs against a temporary SQLit
 
 | Module | Tests | Focus |
 |---|---|---|
-| `test_core_services.py` | 16 | Users, roles, revocation, lockout, tokens, groups, project creation and provisioning |
+| `test_core_services.py` | 23 | Users, roles, revocation, lockout, tokens, groups, group renaming, project creation and provisioning |
 | `test_validation_search_previews.py` | 8 | Leaf satisfaction, error semantics, state transitions, ranking order, preview planning and transcoding |
 | `test_jobs.py` | 2 | Scheduled scan and reminder behaviour |
-| `test_handlers.py` | 33 | End to end command and button flows through the fake Telegram application |
-| **Total** | **59** | |
+| `test_handlers.py` | 38 | End to end command and button flows through the fake Telegram application, including the live status message and two chat routing |
+| **Total** | **71** | |
 {widths:34,12,54}
 
 ## Running the suite
