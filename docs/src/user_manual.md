@@ -401,7 +401,8 @@ This means two things.
 
 ## Checking progress yourself
 
-Send `/status` **inside the MG Group**. The bot posts the current state of that group's open archives.
+Send `/status` **inside the MG Group**. The bot brings each archive's progress message to the bottom
+of the chat, with the numbers brought up to date.
 
 ```
 Easter Opening 2026 - Incomplete
@@ -466,7 +467,9 @@ Contin Lyrics PNG files do not get a video preview.
 1. **Do not rename the standard folders.** The bot looks for them by name.
 2. **Do not put your files at the top level** of the project folder. They must be inside the right folder
    for the bot to see them.
-3. **Do not put anything in `_Previews/`.** The bot manages that folder and removes files it did not make.
+3. **Do not put anything in `_Previews/`.** That folder belongs to the bot. It puts preview videos
+   there and deletes them again when the master they came from is replaced or removed, so anything
+   you leave there will be confusing at best.
 4. **Do not upload an empty placeholder file** to make a folder look finished. Zero byte files do not count
    and the archive will still be incomplete.
 5. **Do not delete files after the archive is verified** unless you mean to. Removing files makes an
@@ -571,9 +574,15 @@ You can change this later from the project menu if you get it wrong.
 ```
 Which MG Group should receive announcements and progress?
 
+No group in the list? A Team Lead can authorise one with
+/creategroup, then /activate in the group.
+
 [ Motion Graphics Team ]
+[ Youth Ministry ]
 [ No group (announce later) ]
 ```
+
+Every authorised group is listed, oldest first.
 
 The bot always asks, even when only one group is authorised. This is deliberate: when a ministry runs
 several groups, it is far too easy to announce a project in the wrong chat, and a single tap is a
@@ -1258,7 +1267,7 @@ It needs a higher role. Send `/whoami` to see your role and ask the Super Admin 
 
 **The bot ignores me in the group.**
 Either the group has not been authorised, or the command is private chat only. Send `/help` in the group to
-see the three commands that work there.
+see the four commands that work there.
 
 **I revoked a project by mistake.**
 Send `/projects`, tap **Show archived & cancelled**, open the project and tap **Restore project**. Do this
