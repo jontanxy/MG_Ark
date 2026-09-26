@@ -21,6 +21,7 @@ def help_text(user: User | None, *, private: bool) -> str:
         return (
             "<b>MG Group commands</b>\n"
             "/status — archive progress for this group's projects\n"
+            "/files — folder-by-folder list of the files uploaded so far\n"
             "/remind — post reminders for missing uploads (Team Lead)\n"
             "/activate &lt;token&gt; — authorise this group (Team Lead)\n\n"
             "Search, previews and project management happen in a private chat with me."
@@ -29,7 +30,7 @@ def help_text(user: User | None, *, private: bool) -> str:
     lines = [
         "<b>Commands</b>",
         "/search &lt;terms&gt; — find archived projects (comma-separated, e.g. <code>worship, gold</code>)",
-        "…or just type keywords to search.",
+        "…or just type keywords to search. Every result offers Preview, Open Archive, Details and Files.",
     ]
     if rank >= ROLE_RANK[Role.TEAM_LEAD]:
         lines += [

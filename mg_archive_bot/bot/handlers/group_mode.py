@@ -14,7 +14,7 @@ from ...services import projects as project_service
 from ...util import esc
 from ...services.validation import latest_report
 from ..access import limiter, require, settings_of
-from ..actions import check_project, live_status_text, refresh_live_status, tree_of
+from ..actions import check_project, live_status_text, project_file_listing, refresh_live_status, tree_of
 
 log = logging.getLogger(__name__)
 
@@ -44,6 +44,22 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE, actor: 
                 await refresh_live_status(context, session, project, live_status_text(context, project, report), repost=True)
             if report.had_errors:  # never stored as the live message: the last good state stays
                 await update.message.reply_text(notifications.progress_message(project, report, tree_of(context), tz))
+
+
+@require(scope="group")
+async def cmd_files(update: Update, context: ContextTypes.DEFAULT_TYPE, actor: User) -> None:
+    """Folder-by-folder file listing for this group's open archives."""
+    chat_id = update.effective_chat.id
+    with session_scope() as session:
+        projects = project_service.list_projects(session, OPEN, group_chat_id=chat_id)
+        if not projects:
+            await update.message.reply_text("No open archives are linked to this group.")
+            return
+        if len(projects) > MAX_PER_STATUS:
+            await update.message.reply_text(f"{len(projects)} open archives — showing the {MAX_PER_STATUS} most recent.")
+        for project in projects[:MAX_PER_STATUS]:
+            for chunk in await project_file_listing(context, project):
+                await update.message.reply_text(chunk)
 
 
 @require(Role.TEAM_LEAD, scope="group")

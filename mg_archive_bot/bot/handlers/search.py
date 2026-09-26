@@ -14,7 +14,7 @@ from ...services import search as search_service
 from ...services.validation import latest_report
 from ...util import esc, normalise_terms
 from ..access import require, set_prompt, settings_of
-from ..actions import send_preview, tree_of, user_by_id
+from ..actions import project_file_listing, send_preview, tree_of, user_by_id
 from ..keyboards import more_results_keyboard, previews_keyboard, search_card_keyboard
 
 log = logging.getLogger(__name__)
@@ -117,6 +117,11 @@ async def search_result_callback(update: Update, context: ContextTypes.DEFAULT_T
                     reply_markup=previews_keyboard(project),
                 )
                 return
+        elif action == "files":
+            await query.answer("Reading Google Drive…")
+            for chunk in await project_file_listing(context, project):
+                await query.message.reply_text(chunk)
+            return
         elif action == "details":
             await query.answer()
             report = latest_report(session, project)
