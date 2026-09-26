@@ -1093,3 +1093,71 @@ async def test_file_listing_from_menu_search_and_group(harness, authorised_group
     assert q.answers[-1] == ("This project's folder is in the Drive trash.", True)
     await harness.command(DESIGNER, "/files", chat=GROUP)
     assert "No open archives" in bot.last(GROUP.id)["text"]
+
+
+@pytest.mark.asyncio
+async def test_lights_role_is_view_only(harness, authorised_group, drive):
+    bot = harness.bot
+    lights = FakeUser(6001, "Lucy", "Lights", username="lucy")
+    with session_scope() as s:
+        user_service.register_designer(s, lights.id, lights.full_name, lights.username)
+    # Super Admin assigns the role from the user card
+    q = await harness.press(ADMIN, f"ad:u:{lights.id}")
+    labels = [t for t, _ in harness.buttons(q.edits[-1]["reply_markup"])]
+    assert "💡 Make Lights" in labels and "⬆️ Make Team Lead" in labels and "🎨 Make Designer" not in labels
+    q = await harness.press(ADMIN, f"ad:u:{lights.id}:role:LIGHTS")
+    assert "Role: Lights" in q.edits[-1]["text"]
+    assert [t for t, _ in harness.buttons(q.edits[-1]["reply_markup"])][:2] == ["⬆️ Make Team Lead", "🎨 Make Designer"]
+    with session_scope() as s:
+        assert user_service.get_user(s, lights.id).role == Role.LIGHTS
+    # can search, see details, files and previews
+    await run_wizard(harness, with_meta=True)
+    with session_scope() as s:
+        pid = project_service.list_projects(s)[0].id
+        s.add(PreviewAsset(project_id=pid, category=AssetCategory.TIMELINE, source_key="timeline_prores", source_drive_id="src1", source_name="Loop.mov", preview_name="Loop.mp4", preview_drive_id="pv1", preview_link="https://drive.google.com/file/d/pv1/view", size_bytes=5_000_000, status=PreviewStatus.READY))
+    await harness.command(lights, "/start")
+    assert "Lights access" in bot.last(lights.id)["text"] and "/newproject" not in bot.last(lights.id)["text"]
+    await harness.command(lights, "/search worship")
+    assert "1 result" in bot.texts(lights.id)[-2]
+    assert harness.buttons(bot.last_markup(lights.id)) == [("▶️ Preview", f"sr:{pid}:prev")]  # no archive link, details or files
+    await harness.press(lights, f"sr:{pid}:prev")
+    assert harness.buttons(bot.last_markup(lights.id)) == [("▶️ Play preview on Google Drive", "https://drive.google.com/file/d/pv1/view")]
+    n = len(bot.texts(lights.id))
+    for action in ("details", "files"):  # crafted button data is refused
+        q = await harness.press(lights, f"sr:{pid}:{action}")
+        assert q.answers[-1] == ("Lights access is preview-only.", True)
+    assert len(bot.texts(lights.id)) == n
+    await harness.command(lights, "/files", chat=GROUP)
+    assert "preview-only" in bot.last(GROUP.id)["text"]
+    await harness.command(lights, "/status", chat=GROUP)  # progress is fine: the group sees it anyway
+    assert bot.last(GROUP.id)["text"].startswith("📊")
+    # designers keep the full card
+    await harness.command(DESIGNER, "/search worship")
+    assert [t for t, _ in harness.buttons(bot.last_markup(DESIGNER.id))] == ["▶️ Preview", "📁 Open Archive", "ℹ️ Details", "📂 Files"]
+    # nothing else: Team Lead / admin commands and buttons are refused
+    for cmd in ("/newproject", "/projects", "/creategroup", "/sheet"):
+        await harness.command(lights, cmd)
+        assert "requires the Team Lead role" in bot.last(lights.id)["text"]
+    await harness.command(lights, "/users")
+    assert "requires the Super Admin role" in bot.last(lights.id)["text"]
+    q = await harness.press(lights, f"pj:{pid}:verify2")
+    assert "Team Lead" in q.answers[-1][0]
+    # never offered for assignment, and cannot be assigned even with crafted data
+    q = await harness.press(LEAD, f"pj:{pid}:assign")
+    await harness.press(LEAD, f"pj:{pid}:asgcat:ALL")
+    offered = [d for _, d in harness.buttons(bot.last(LEAD.id)["reply_markup"]) if d.startswith(f"pj:{pid}:asg:ALL:")]
+    assert f"pj:{pid}:asg:ALL:{DESIGNER.id}" in offered and f"pj:{pid}:asg:ALL:{lights.id}" not in offered
+    q = await harness.press(LEAD, f"pj:{pid}:asg:ALL:{lights.id}")
+    assert q.answers[-1][1] is True and "cannot be assigned" in q.answers[-1][0]
+    await harness.command(LEAD, "/newproject")
+    await harness.press(LEAD, "nw:col:none")
+    await harness.text(LEAD, "Second Song")
+    await harness.press(LEAD, "nw:decl:done")
+    await harness.press(LEAD, f"nw:grp:{GROUP.id}")
+    q = await harness.press(LEAD, "nw:meta:skip")
+    assert not any(d == f"nw:asg:{lights.id}" for _, d in harness.buttons(q.edits[-1]["reply_markup"]))
+    await harness.command(LEAD, "/cancel")
+    # the registration notice offers Lights directly
+    await harness.command(STRANGER, "/start")
+    await harness.text(STRANGER, PASSWORD)
+    assert ("💡 Make Lights", f"ad:u:{STRANGER.id}:role:LIGHTS") in harness.buttons(bot.last(ADMIN.id)["reply_markup"])

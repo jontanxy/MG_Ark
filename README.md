@@ -17,7 +17,7 @@ Requirements: `docs/REQUIREMENTS.md` · Design: `docs/DESIGN.md`
 | Previews | ProRes 4444 files in Timeline / Contin Videos are transcoded to small MP4s (ffmpeg) stored in `_Previews/` on Drive; **Preview** hands out their Drive links privately (nothing is uploaded to Telegram) |
 | Discovery | `/search worship, gold, particles` (AND, case-insensitive, de-duplicated) ranked: exact tag → name → event/collection → metadata → description. Result cards offer **Preview**, **Open Archive**, **Details** |
 | Project index | A Google Sheet in the archive root with one row per project ever created, kept in sync automatically (`/sheet`) |
-| Roles | Super Admin (fixed Telegram ID), Team Lead, Designer — exactly the permissions in the requirements |
+| Roles | Super Admin (fixed Telegram ID), Team Lead, Designer — exactly the permissions in the requirements — plus **Lights**, a preview-only role (search + Preview, nothing else) that is never assigned uploads |
 | Access | Password registration on `/start` (never asked again), revocation, brute-force lockout, MG Groups authorised only via provisioning tokens, "authorised user AND authorised group" rule in groups |
 
 ## 1. Prerequisites
@@ -131,6 +131,10 @@ python -m mg_archive_bot.tools.reset_password
 2. **Team Leads**: each sends `/start` and the access password (they register as Designer), then the Super Admin runs
    `/users` → taps the user → **Make Team Lead**.
 3. **Designers**: `/start` + password. Done.
+   **Lights** (people who only need to find songs and watch previews): same registration, then the Super Admin taps
+   **💡 Make Lights** on the registration notice or in `/users`. Their search results carry a single **Preview**
+   button — no archive links, details or file lists — and they never appear in the "assign designers" lists.
+   (They still need Drive access to the archive folder for the preview links to play.)
 4. **MG Group**: a Team Lead runs `/creategroup` (private chat) to get a token, creates the Telegram group, adds the bot.
    If the token holder added the bot the group is authorised automatically; otherwise send `/activate MG-XXXX-XXXX`
    in the group. Only groups authorised this way are usable.

@@ -5,7 +5,7 @@ from datetime import timedelta
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..constants import ROLE_RANK, Role, UserStatus
+from ..constants import CONTRIBUTOR_ROLES, ROLE_RANK, Role, UserStatus
 from ..models import LoginAttempt, Setting, User
 from ..security import hash_password, verify_password
 from ..util import utcnow
@@ -72,6 +72,11 @@ def list_users(session: Session) -> list[User]:
 
 def list_active_users(session: Session) -> list[User]:
     return [u for u in list_users(session) if u.status == UserStatus.ACTIVE]
+
+
+def list_assignable_users(session: Session) -> list[User]:
+    """Active users who upload assets (Lights are view-only and never assigned)."""
+    return [u for u in list_active_users(session) if u.role in CONTRIBUTOR_ROLES]
 
 
 def set_role(session: Session, telegram_id: int, role: Role, super_admin_id: int) -> User:
