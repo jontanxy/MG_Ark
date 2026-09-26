@@ -60,6 +60,10 @@ def test_user_registration_roles_and_revocation(db, settings):
         # roles
         user_service.set_role(s, 5, Role.TEAM_LEAD, SUPER_ADMIN_ID)
         assert user_service.get_user(s, 5).role == Role.TEAM_LEAD
+        user_service.set_role(s, 5, Role.LIGHTS, SUPER_ADMIN_ID)
+        assert user_service.get_user(s, 5).role == Role.LIGHTS
+        assert [u.telegram_id for u in user_service.list_assignable_users(s)] == [SUPER_ADMIN_ID]  # Lights excluded
+        user_service.set_role(s, 5, Role.TEAM_LEAD, SUPER_ADMIN_ID)
         with pytest.raises(user_service.UserError):
             user_service.set_role(s, SUPER_ADMIN_ID, Role.DESIGNER, SUPER_ADMIN_ID)
         with pytest.raises(user_service.UserError):

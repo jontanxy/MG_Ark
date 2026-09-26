@@ -291,7 +291,7 @@ async def handle_wizard_meta(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
 
 async def _wizard_assign_step(update: Update, context: ContextTypes.DEFAULT_TYPE, session: Session, project: Project) -> None:
-    users = user_service.list_active_users(session)
+    users = user_service.list_assignable_users(session)
     selected = {a.user_id for a in project.assignments if a.category == AssetCategory.ALL}
     text = "👥 Who is working on this project? Toggle designers, then Done.\n<i>★ = Team Lead. Per-folder assignments can be refined later from the project menu.</i>"
     kb = user_toggle_keyboard(users, selected, "nw:asg", "nw:asg:done")
@@ -403,7 +403,7 @@ async def wizard_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, ac
             else:
                 project_service.toggle_assignment(session, project, int(arg), AssetCategory.ALL)
                 session.commit()
-                users = user_service.list_active_users(session)
+                users = user_service.list_assignable_users(session)
                 selected = {a.user_id for a in project.assignments if a.category == AssetCategory.ALL}
                 await query.edit_message_reply_markup(user_toggle_keyboard(users, selected, "nw:asg", "nw:asg:done"))
         elif step == "confirm":
@@ -457,7 +457,7 @@ async def handle_meta_value(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
 
 async def _assign_users_view(update: Update, session: Session, project: Project, category: AssetCategory) -> None:
-    users = user_service.list_active_users(session)
+    users = user_service.list_assignable_users(session)
     selected = {a.user_id for a in project.assignments if a.category == category}
     await safe_edit(
         update,
@@ -553,7 +553,7 @@ async def project_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, a
             session.commit()
             schedule_sheet_sync(context, project.id)
             await query.answer("Assigned" if now_on else "Unassigned")
-            users = user_service.list_active_users(session)
+            users = user_service.list_assignable_users(session)
             selected = {a.user_id for a in project.assignments if a.category == category}
             await query.edit_message_reply_markup(
                 user_toggle_keyboard(users, selected, f"pj:{project.id}:asg:{category.value}", f"pj:{project.id}:assign")

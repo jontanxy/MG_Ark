@@ -11,7 +11,9 @@ from ..config import Settings
 from ..constants import (
     CATEGORY_FLAGS,
     CATEGORY_LABELS,
+    CONTRIBUTOR_ROLES,
     METADATA_FIELDS,
+    ROLE_LABELS,
     REVOCABLE_STATUSES,
     AssetCategory,
     FolderSpec,
@@ -209,8 +211,11 @@ def toggle_assignment(session: Session, project: Project, user_id: int, category
             project.assignments.remove(a)
             session.flush()
             return False
-    if session.get(User, user_id) is None:
+    user = session.get(User, user_id)
+    if user is None:
         raise ProjectError("User not found.")
+    if user.role not in CONTRIBUTOR_ROLES:
+        raise ProjectError(f"{user.display_name} has the {ROLE_LABELS[user.role]} role and cannot be assigned assets.")
     a = Assignment(project_id=project.id, user_id=user_id, category=category)
     session.add(a)
     project.assignments.append(a)

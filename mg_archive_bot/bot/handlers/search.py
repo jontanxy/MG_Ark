@@ -6,6 +6,7 @@ import logging
 from telegram import Update
 from telegram.ext import ContextTypes
 
+from ...constants import Role
 from ...db import session_scope
 from ...models import User
 from ...services import notifications
@@ -20,7 +21,14 @@ from ..keyboards import more_results_keyboard, previews_keyboard, search_card_ke
 log = logging.getLogger(__name__)
 
 
-async def _send_results(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str, page: int) -> None:
+LIGHTS_ONLY_PREVIEW = "Lights access is preview-only."
+
+
+def _view_only(actor: User) -> bool:
+    return actor.role == Role.LIGHTS
+
+
+async def _send_results(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str, page: int, actor: User) -> None:
     settings = settings_of(context)
     page_size = settings.search_page_size
     chat_id = update.effective_chat.id
@@ -47,7 +55,7 @@ async def _send_results(update: Update, context: ContextTypes.DEFAULT_TYPE, quer
             await context.bot.send_message(
                 chat_id,
                 notifications.search_result_card(hit.project),
-                reply_markup=search_card_keyboard(hit.project),
+                reply_markup=search_card_keyboard(hit.project, view_only=_view_only(actor)),
             )
             if is_last and has_more:
                 await context.bot.send_message(
@@ -67,14 +75,14 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE, actor: 
             "🔍 Send your search terms, comma-separated.\nExample: <code>worship, gold, particles</code> (all terms must match)."
         )
         return
-    await _send_results(update, context, query, 0)
+    await _send_results(update, context, query, 0, actor)
 
 
 async def handle_search_text(update: Update, context: ContextTypes.DEFAULT_TYPE, actor: User) -> None:
     from ..access import clear_prompt
 
     clear_prompt(context)
-    await _send_results(update, context, update.message.text or "", 0)
+    await _send_results(update, context, update.message.text or "", 0, actor)
 
 
 @require(scope="private")
@@ -90,7 +98,7 @@ async def search_page_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_reply_markup(None)
     except Exception:  # pragma: no cover - cosmetic
         pass
-    await _send_results(update, context, saved, page)
+    await _send_results(update, context, saved, page, actor)
 
 
 @require(scope="private")
@@ -117,6 +125,9 @@ async def search_result_callback(update: Update, context: ContextTypes.DEFAULT_T
                     reply_markup=previews_keyboard(project),
                 )
                 return
+        elif action in ("files", "details") and _view_only(actor):
+            await query.answer(LIGHTS_ONLY_PREVIEW, show_alert=True)  # crafted button data gets nothing extra
+            return
         elif action == "files":
             await query.answer("Reading Google Drive…")
             for chunk in await project_file_listing(context, project):
