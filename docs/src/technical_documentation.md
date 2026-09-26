@@ -58,8 +58,9 @@ are published separately in the *User Manual*.
 
 | Version | Date | Author | Summary |
 |---|---|---|---|
-| 1.0.0 | 18 September 2026 | Development Team | First released edition covering the complete 1.0.0 feature set |
-{widths:12,18,25,45}
+| 1.0 | 18 September 2026 | Development Team | First released edition covering the complete 1.0.0 feature set |
+| 1.1 | 26 September 2026 | Development Team | Adds the Lights role, the file listing subsystem, the live status message, the group name synchronisation, the registration notice and the password reset tool |
+{widths:10,18,22,50}
 
 # System overview
 
@@ -113,7 +114,7 @@ provisioning, tracking, chasing and discovery.
 | Previews | ProRes masters in the declared delivery folders are transcoded to compact MP4 files stored on Drive and handed out as streaming links |
 | Discovery | A private search command performs conjunctive matching across name, tags and metadata, ranked by match quality |
 | Project index | A Google Sheet in the archive root holds one row per project and is kept in step automatically |
-| Access control | Password based registration, three fixed roles, revocation, group authorisation by token and brute force protection |
+| Access control | Password based registration, four fixed roles, revocation, group authorisation by token and brute force protection |
 {widths:22,78}
 
 ## Design principles
@@ -141,7 +142,7 @@ decisions later in this document follow from them.
 
 The bot does not generate Hap or Hap Alpha renditions, it does not upload video content into Telegram, it
 does not manage Google Drive permissions, and it does not provide PNG previews for Contin Lyrics. These
-exclusions are deliberate and are discussed in section 16.
+exclusions are deliberate and are discussed in section 17.
 
 # Architecture
 
@@ -153,7 +154,7 @@ asyncio event loop.
 | Activity | Implementation | Responsibility |
 |---|---|---|
 | Update processing | `python-telegram-bot` application with concurrent updates enabled | Commands, button presses, membership changes |
-| Scheduled jobs | The library's job queue, backed by APScheduler | Drive scans, daily reminders, nightly index rebuild, stale chat eviction |
+| Scheduled jobs | The library's job queue, backed by APScheduler | Drive scans, daily reminders, nightly index rebuild, group name refresh, stale chat eviction |
 | Preview worker | A single background asyncio task consuming a queue | Serialised download, transcode and upload of previews |
 {widths:22,34,44}
 
@@ -195,6 +196,7 @@ mg_archive_bot/
     projects.py        creation, provisioning, metadata, assignments, transitions
     validation.py      the scan algorithm, reports and status transitions
     previews.py        preview planning, transcoding, upload and bookkeeping
+    listing.py         folder by folder reading of a project's Drive folder
     search.py          normalisation, conjunctive matching, ranking
     tracking.py        the project index sheet layout and synchronisation
     notifications.py   message builders for private replies and group posts
@@ -209,6 +211,7 @@ mg_archive_bot/
   tools/
     drive_check.py     diagnostic for Drive access and sharing
     google_oauth.py    one time OAuth token bootstrap
+    reset_password.py  set the access password and clear login lockouts
 ```
 
 The dependency direction is strict: `bot` depends on `services`, and `services` never imports from `bot`.
@@ -285,15 +288,16 @@ All timestamps are stored as naive UTC values and converted to the configured lo
 
 ## The project record
 
-The `projects` table carries five groups of columns.
+The `projects` table carries six groups of columns.
 
 | Group | Columns | Notes |
 |---|---|---|
-| Identity | `id`, `name`, `collection_id`, `status` | The display name is `Collection / Project` when the project belongs to a collection |
+| Identity | `id`, `name`, `collection_id`, `status`, `mg_group_chat_id` | The display name is `Collection / Project` when the project belongs to a collection |
 | Declarations | `has_timeline`, `has_contin_videos`, `has_contin_lyrics`, `has_psd` | These four flags drive folder creation, validation and preview sourcing |
 | Metadata | `collection`, `event`, `ministry`, `style`, `colours`, `year`, `creator`, `asset_types`, `description` | Free text used by discovery; free text fields are capped at 200 characters and the description at 2000 |
 | Drive linkage | `drive_root_id`, `drive_link` | Populated when the tree is provisioned |
-| Audit | `created_by`, `created_at`, `activated_at`, `last_validated_at`, `last_complete`, `last_reminder_at`, `verified_by`, `verified_at`, `cancelled_by`, `cancelled_at` | Supports the lifecycle, the reminder interval and the index sheet |
+| Live status message | `status_message_id`, `status_message_hash` | Identify the single progress message the bot maintains in the MG Group, and the digest of its current text so an unchanged message is never rewritten |
+| Audit | `created_by`, `created_at`, `activated_at`, `last_validated_at`, `last_complete`, `last_reminder_at`, `verified_by`, `verified_at`, `cancelled_by`, `cancelled_at`, `created_at`, `updated_at` | Supports the lifecycle, the reminder interval and the index sheet |
 {widths:16,40,44}
 
 Project names are validated to between 2 and 100 characters, are rejected if they contain angle brackets,
@@ -303,7 +307,7 @@ and must be unique, case insensitively, within their collection or within the to
 
 | Enumeration | Values |
 |---|---|
-| `Role` | `SUPER_ADMIN`, `TEAM_LEAD`, `DESIGNER` |
+| `Role` | `SUPER_ADMIN`, `TEAM_LEAD`, `DESIGNER`, `LIGHTS` |
 | `UserStatus` | `ACTIVE`, `REVOKED` |
 | `GroupStatus` | `ACTIVE`, `REVOKED` |
 | `ProjectStatus` | `DRAFT`, `ACTIVE`, `INCOMPLETE`, `READY_FOR_VERIFICATION`, `ARCHIVED`, `CANCELLED` |
@@ -347,7 +351,7 @@ Drive or because the root folder was shared with them by an administrator.
 
 ## Client design
 
-The Drive client is defined as a protocol with ten operations, which allows the in memory double used by
+The Drive client is defined as a protocol with nine operations, which allows the in memory double used by
 the tests and by demonstration mode to be substituted wherever the real client is expected.
 
 | Aspect | Implementation |
@@ -618,6 +622,56 @@ in the Google Drive player. The multi gigabyte master is never opened, nothing i
 there is no file size ceiling to manage. If a preview is requested before it is ready, the reply states the
 current status instead.
 
+# File listing
+
+## Purpose
+
+Progress reporting answers whether a required folder holds at least one file. It deliberately says
+nothing about *which* files those are. The listing subsystem answers the second question: it reads a
+project's Drive folder in full and renders it, folder by folder, as a set of Telegram messages in
+which every folder and every file is a link.
+
+It is used for three things: a Team Lead confirming that what arrived is what was asked for, a
+designer checking their own upload without opening Drive, and anyone inspecting a past archive found
+through search.
+
+## Reading the tree
+
+`services/listing.py` builds an in-memory tree of `FolderEntry` and `FileEntry` records. The read is
+blocking and runs in a worker thread.
+
+| Aspect | Behaviour |
+|---|---|
+| Depth | Six levels below the project folder, which allows three levels of designer sub-folders beneath a leaf such as `Working File / Fonts`. Anything deeper is reported as not shown rather than silently omitted |
+| Ordering | Folders the bot created keep their archive order, so the tree reads in the same sequence as the specification; every other folder is alphabetical, as are files |
+| Exclusions | The same junk filter the validator uses, so operating system metadata and zero byte files are left out of both counts and listings |
+| Counts | Each folder shows the total number of files beneath it, including its sub-folders, or is marked empty |
+| Failures | A folder that cannot be listed is marked individually and the rest of the tree is still rendered. One unreadable folder never costs the whole listing |
+{widths:16,84}
+
+## Rendering
+
+`render_listing` turns the tree into Telegram HTML. The header carries the project name, the total
+file count and the summed size, and links to the project folder. Sizes are formatted per file, and
+every name is a link: a folder opens in Drive, a file opens in Drive's viewer.
+
+Telegram caps a message at 4096 characters after parsing, so output is split at 3500 raw characters
+and the parts are numbered. Splitting happens between lines, so a file entry is never cut in half.
+
+## Entry points
+
+| Entry point | Who | Scope |
+|---|---|---|
+| Project menu, **Files** | Team Lead | One project |
+| Search result card, **Files** | Everyone except Lights | One project, including archived ones |
+| `/files` in an MG Group | Everyone in that group except Lights | The group's open archives, up to six, most recent first |
+{widths:34,22,44}
+
+A listing is reused for `STATUS_COOLDOWN_SECONDS`, the same window that governs the group status
+command, and read from Drive again after that. The window is short enough that the listing still
+describes the archive as it is rather than as the last scan saw it, and long enough that several
+people asking at once in a group produce one read rather than one each.
+
 # Discovery and ranking
 
 ## Query normalisation
@@ -655,14 +709,15 @@ recent year, then alphabetical order. Results are paginated at `SEARCH_PAGE_SIZE
 with a button to fetch the next page.
 
 Scoring runs in the application over the candidate set rather than in SQL. For an archive of this size the
-cost is negligible and the ranking logic stays directly testable. Section 16 records the point at which an
+cost is negligible and the ranking logic stays directly testable. Section 17 records the point at which an
 index backed approach would become worthwhile.
 
 ## Result presentation
 
 Each result is a card showing the display name, the tags, the number of available previews and the current
-status, with three actions: play a preview, open the archive folder on Drive, or expand the full details
-including metadata, folder links and the latest validation summary.
+status, with four actions: play a preview, open the archive folder on Drive, expand the full details
+including metadata, folder links and the latest validation summary, or list the files. A reader holding
+the Lights role is offered the preview alone.
 
 # Project index sheet
 
@@ -736,7 +791,8 @@ directing the user to a private chat, which is what keeps the shared channel rea
 
 | Group command | Minimum role | Function |
 |---|---|---|
-| `/status` | Designer | Progress of this group's open archives |
+| `/status` | Designer | Bring this group's live progress messages to the bottom of the chat with fresh figures |
+| `/files` | Designer | List, folder by folder, what has been uploaded for this group's open archives. Refused for Lights |
 | `/remind` | Team Lead | Post reminders for missing uploads |
 | `/activate <token>` | Team Lead | Authorise this group with a provisioning token |
 | `/help` | None | List the group commands |
@@ -745,6 +801,26 @@ directing the user to a private chat, which is what keeps the shared channel rea
 Command lists are registered with Telegram at three scopes, so each person sees an appropriate menu: all
 private chats, all group chats, and a private scope for the Super Admin that additionally exposes the three
 administrative commands.
+
+## The creation wizard
+
+`/newproject` gathers a project in seven stages: where it lives, the name, the asset declarations,
+the MG Group, optional metadata, the designer assignment, and a summary that must be confirmed
+before anything is created on Drive.
+
+The draft row exists from the name stage onward, so every later answer is persisted rather than held
+in memory and a restart mid wizard loses only the step in progress. A draft that is abandoned
+without `/cancel` survives until the same Team Lead successfully names their next one, at which
+point creating that draft deletes their earlier ones. Nothing is provisioned on Drive until the
+final confirmation, so an abandoned draft leaves no folders behind.
+
+The MG Group stage is always presented. An earlier release linked the project silently when exactly
+one group was authorised. That shortcut was removed: a Team Lead running several productions, each
+with its own chat, could not see where the announcement was about to go, and an announcement posted
+into the wrong chat cannot be recalled. The stage therefore lists every active group, oldest first,
+followed by an option to defer, and repeats in the same message how to authorise a group that is
+missing. Where the group is left unset, the summary says so explicitly rather than showing a blank,
+because a project with no group is announced nowhere and tracked silently.
 
 ## Callback routing
 
@@ -782,12 +858,57 @@ All outgoing messages use Telegram's HTML parse mode. Every interpolated value p
 helper, and link previews are disabled so that a Drive link does not expand into a large card. Designer
 mentions use the `tg://user` form, which works even for people who have no public username.
 
+## The live status message
+
+A naive implementation posts a fresh progress message every time a scan runs. At a thirty minute
+interval across a handful of open projects, that buries the MG Group in near identical messages and
+trains people to ignore it.
+
+Instead each project owns exactly one progress message in its group, identified by
+`status_message_id`, and the bot edits that message in place.
+
+| Trigger | Behaviour |
+|---|---|
+| Scheduled scan, private **Check progress**, and the verify, reopen, restore and revoke transitions | Edit the existing message silently. Nothing is created, so background work never adds to the chat |
+| `/status` | Move the message to the bottom of the chat with current figures. The previous copy is deleted, or relabelled as outdated when Telegram no longer permits deleting it, which is 48 hours |
+| Reminders, and the ready, archived and cancelled notices | Posted as separate messages, because their purpose is to notify people rather than to record state |
+{widths:34,66}
+
+Three properties follow from the design and are worth stating because each was a deliberate choice.
+
+1. **The bot never creates the message by itself.** The first `/status` in a group creates it. A
+   group that nobody has asked for status in therefore receives no progress traffic at all.
+2. **An unchanged message is never rewritten.** `status_message_hash` holds a digest of the rendered
+   text, and an edit that would produce the same text is skipped, which avoids both the API call and
+   the "edited" marker appearing on a message that did not change.
+3. **Losing the message is harmless.** If a group administrator deletes it, the next edit fails, the
+   stored identifier is cleared and scans fall silent again until the next `/status` re-creates it.
+   Relinking a project to a different group clears it for the same reason.
+
+A scan whose report carried Drive errors never becomes the live message, so the last known good
+state stays on display. In that case `/status` replies with a separate warning instead.
+
+## Group identity and renaming
+
+A Telegram group's name can change at any time, and a stale name in the project menu or the index
+sheet is a small but persistent annoyance. The stored name is kept current from three directions:
+
+- A `new_chat_title` service message updates it immediately.
+- The authorisation gate writes the name through on the way past, so ordinary use keeps it fresh at
+  no extra cost. This covers `/status`, `/files` and `/remind`, the three group commands that pass
+  through the gate. The group `/help` is ungated and refreshes nothing.
+- A job every six hours, first run 30 seconds after start, asks Telegram for each authorised group's
+  name. A rename made while the bot was stopped raises no service message, so without this job it
+  would go unnoticed until somebody next ran a gated command in that group.
+
 ## Chat migration
 
 When a basic group is upgraded to a supergroup its chat identifier changes. This is handled twice, because
 the migration can be observed through either path. A service message handler re-keys the group record and
 every project that referenced the old identifier, and every outbound group send catches the migration
-error, re-keys, and retries the send. Authorisation therefore survives an upgrade without operator action.
+error, re-keys, and retries the send. A live status message that is reposted during a migration is
+recorded against the new chat identifier, so the project does not end up pointing at a message in a
+chat that no longer exists. Authorisation therefore survives an upgrade without operator action.
 
 # Security
 
@@ -813,16 +934,18 @@ access does not merely log someone out, it prevents them from coming back throug
 
 ## Authorisation
 
-| Capability | Super Admin | Team Lead | Designer |
-|---|---|---|---|
-| Search, preview, open archive | Yes | Yes | Yes |
-| Create and manage projects, assign designers, verify | Yes | Yes | No |
-| Create MG Group provisioning tokens | Yes | Yes | No |
-| Project index sheet | Yes | Yes | No |
-| Manage users, roles and revocation | Yes | No | No |
-| Manage and revoke MG Groups | Yes | No | No |
-| Change the access password | Yes | No | No |
-{widths:46,18,18,18}
+| Capability | Super Admin | Team Lead | Designer | Lights |
+|---|---|---|---|---|
+| Search the archive and play previews | Yes | Yes | Yes | Yes |
+| Open the Drive folder, read full details, list files | Yes | Yes | Yes | No |
+| Be assigned responsibility for an asset | Yes | Yes | Yes | No |
+| Create and manage projects, assign designers, verify | Yes | Yes | No | No |
+| Create MG Group provisioning tokens | Yes | Yes | No | No |
+| Project index sheet | Yes | Yes | No | No |
+| Manage users, roles and revocation | Yes | No | No | No |
+| Manage and revoke MG Groups | Yes | No | No | No |
+| Change the access password | Yes | No | No | No |
+{widths:40,15,15,15,15}
 
 Authorisation is enforced by a single decorator applied to every handler, which checks the chat scope, the
 existence and active status of the actor, the minimum role and, in a group, the group's authorisation. The
@@ -833,6 +956,37 @@ other row holding the role is demoted to Team Lead.
 The group rule is the conjunction required by the specification: an action in a group requires **both** an
 authorised user **and** an authorised MG Group. An unauthorised user in an authorised group is denied, and
 an authorised user in an unauthorised group is denied.
+
+## The Lights role
+
+Lights operators need to find a song and watch its preview during a service. They do not contribute
+assets and have no reason to reach the archive itself. The `LIGHTS` role expresses exactly that: it
+ranks alongside `DESIGNER`, so it clears the same private chat gate, but its surface is cut down to
+search and previews.
+
+| Surface | Behaviour for Lights |
+|---|---|
+| Search | Works normally. The result card carries a single **Preview** button |
+| Open Archive, Details, Files | Not offered. Open Archive is a link button and is simply absent; the Details and Files callbacks are refused if replayed |
+| `/files` in a group | Refused with an explanation |
+| `/status` in a group | Allowed, because the group can already see that message |
+| Assignment to a project | Impossible. Lights are filtered out of every assignment list, and the service layer rejects the attempt by name |
+{widths:30,70}
+
+Two points of design are worth drawing out.
+
+The restriction is enforced at the handler, not merely by hiding buttons. A Lights user who replays
+a captured callback payload for **Details** or **Files** is refused, so no Drive link and no file
+name reaches them by that route. Hiding a button is presentation; refusing the callback is the
+control.
+
+Exclusion from assignment is enforced in `services/projects.py` rather than only in the keyboard that
+lists candidates. `CONTRIBUTOR_ROLES` names the roles that can hold an assignment, `list_assignable_users`
+filters the pickers, and `toggle_assignment` raises with the person's name and role if something
+slips through. This matters because an assigned Lights user would be mentioned in reminders for work
+they cannot deliver.
+
+The role is a plain string column, so introducing it required no database migration.
 
 ## Group authorisation
 
@@ -850,6 +1004,18 @@ an authorised user in an unauthorised group is denied.
    the Super Admin can restore it. A group the bot was merely removed from can be re-activated normally.
    The distinction is recorded in the group row, so a deliberate revocation cannot be worked around.
 
+## Visibility of registrations
+
+Access is granted by a shared password, so the Super Admin cannot see who used it unless the system
+tells them. Every successful registration therefore produces a direct message naming the person,
+their Telegram handle if they have one, their numeric identifier and the role they were given, with
+two buttons that promote them to Team Lead or open their user card directly.
+
+The control this provides is practical rather than theoretical: an unexpected name arriving is the
+signal that the password has spread beyond the ministry, and the response, revoking that account and
+rotating the password, is two taps away from the notice itself. The Super Admin's own registration
+is not announced to them.
+
 ## Abuse controls
 
 | Control | Threshold | Effect |
@@ -857,7 +1023,7 @@ an authorised user in an unauthorised group is denied.
 | Per account lockout | `LOGIN_MAX_FAILURES`, default 5 | The account is locked for `LOGIN_LOCKOUT_MINUTES`, default 15, and the Super Admin is alerted by direct message |
 | Global circuit breaker | `PASSWORD_BREAKER_FAILURES`, default 30, within `PASSWORD_BREAKER_WINDOW_MINUTES`, default 10 | Registration is paused for `PASSWORD_BREAKER_PAUSE_MINUTES`, default 15, with a single alert. This bounds a distributed guessing attempt that spreads attempts across many accounts |
 | Unknown sender throttle | One reply per `UNREGISTERED_REPLY_INTERVAL_SECONDS`, default 60 | The bot cannot be used as a reply amplifier against a third party |
-| Group status cooldown | `STATUS_COOLDOWN_SECONDS`, default 60 | Repeated `/status` reuses the last result instead of issuing fresh Drive calls |
+| Group status and listing cooldown | `STATUS_COOLDOWN_SECONDS`, default 60 | Repeated `/status` reuses the last scan, and a repeated file listing reuses the last read, instead of issuing fresh Drive calls |
 | Stale chat eviction | `UNAUTHORISED_GROUP_LEAVE_MINUTES`, default 60 | The bot leaves chats it was added to without authorisation |
 {widths:20,28,52}
 
@@ -928,6 +1094,8 @@ button press. Concurrency at this level is cheap to get wrong, so the codebase f
 | Google credentials expired | Reported as a Drive error carrying the specific remediation for the configured authentication mode |
 | Sheets API unavailable or not enabled | The index falls behind; the bot continues; the Super Admin is notified once; the nightly rebuild repairs it |
 | Bot removed from an MG Group | The group is marked revoked; posts stop; the failure to post is logged rather than raised at the user |
+| The live status message cannot be edited | Treated as gone: the stored identifier is cleared, scans fall silent for that project, and the next group status command creates a new message |
+| A folder cannot be listed during a file listing | That folder alone is marked unreadable and the rest of the tree is still rendered; a failure at the project root is reported instead of a listing |
 | Group upgraded to a supergroup | Identifiers are re-keyed and the send is retried automatically |
 | `ffmpeg` missing or failing | The preview row is marked failed with the captured error; the project's lifecycle is unaffected; the creator is notified |
 | Insufficient disk space | Detected before the download starts; the job fails with the required and available figures |
@@ -956,7 +1124,7 @@ typed settings model. An invalid value stops the process with a precise message 
 | `PASSWORD_BREAKER_FAILURES` | 30 | Global wrong password budget |
 | `PASSWORD_BREAKER_WINDOW_MINUTES` | 10 | Window over which that budget is measured |
 | `PASSWORD_BREAKER_PAUSE_MINUTES` | 15 | Registration pause once the budget is exhausted |
-| `STATUS_COOLDOWN_SECONDS` | 60 | Reuse window for the group status command |
+| `STATUS_COOLDOWN_SECONDS` | 60 | Reuse window shared by the group status command and the file listing |
 | `DATABASE_URL` | `sqlite:///data/mg_archive.sqlite3` | Database location; an in memory database is rejected |
 | `WORK_DIR` | `data/work` | Scratch space for preview transcoding |
 | `GOOGLE_AUTH_MODE` | `service_account` | One of `service_account`, `oauth` or `fake` |
@@ -1012,6 +1180,33 @@ volumes, with the database and working directory pointed inside the data volume.
 docker compose up -d --build
 ```
 
+## Operator tools
+
+Three tools run outside the bot process and are invoked with `python -m`.
+
+| Tool | Purpose |
+|---|---|
+| `mg_archive_bot.tools.drive_check` | Report which Google identity the bot uses, whether the archive root is visible, whether it lives in a Shared Drive and whether folders can be created there, naming the exact permission to request when something is missing |
+| `mg_archive_bot.tools.google_oauth` | One time bootstrap of an OAuth token, for the authentication mode that uses a normal Google account |
+| `mg_archive_bot.tools.reset_password` | Set the access password without going through Telegram, and clear every login lockout |
+{widths:34,66}
+
+The password reset tool exists because of a trap in the configuration. `INITIAL_ACCESS_PASSWORD` is
+read exactly once, when the database is first created; editing it in the environment file afterwards
+changes nothing, which is not obvious and has surprised operators. It also covers the case where the
+Super Admin cannot reach Telegram, or where everyone is locked out at once.
+
+```
+python -m mg_archive_bot.tools.reset_password             # take the password from INITIAL_ACCESS_PASSWORD
+python -m mg_archive_bot.tools.reset_password --prompt    # type it, twice, without it being echoed
+```
+
+It rewrites the stored hash and deletes every row in `login_attempts`, so outstanding lockouts end
+immediately. Registered users keep their access: the password governs new registrations only, which
+means the tool is not a way to remove anybody. Revocation in `/users` remains the only way to do
+that. The tool exits non zero and changes nothing when the two prompted entries differ, or when the
+environment variable it was told to use is empty.
+
 ## Startup sequence
 
 1. Settings are loaded and validated; a configuration error exits with status 2 and a precise message.
@@ -1032,6 +1227,7 @@ docker compose up -d --build
 | `scan` | Every `SCAN_INTERVAL_MINUTES`, first run after two minutes | Validate all open projects and queue previews |
 | `reminders` | Daily at `REMINDER_HOUR` | Post outstanding items into each MG Group |
 | `leave-stale-chats` | Every ten minutes, first run after five | Leave chats that were never authorised |
+| `refresh-group-titles` | Every six hours, first run 30 seconds after start | Ask Telegram for each authorised group's current name, which catches renames made while the bot was stopped |
 | `rebuild-sheet` | Daily at 03:30 | Rewrite the project index from the database |
 {widths:20,32,48}
 
@@ -1066,6 +1262,9 @@ what is actually on Drive, and the nightly job repairs the index sheet.
 | Reminders arrive at the wrong hour | The timezone is unset or wrong | Set `TIMEZONE` to the correct IANA zone and restart |
 | The index sheet stops updating | The Sheets API is disabled, or permissions changed | Enable the API or repair access, then run `/sheet rebuild` |
 | A preview never appears | The job failed and is not retried automatically | Open the project menu and request generation, which forces a retry |
+| Nobody knows the access password, or everyone is locked out | The password was never recorded, or a guessing attempt locked the accounts | Run `python -m mg_archive_bot.tools.reset_password --prompt` on the host. Editing `INITIAL_ACCESS_PASSWORD` has no effect on an existing database |
+| The progress message in a group stopped updating | It was deleted in the group, so the bot forgot it | Send `/status` in that group; the message is created again and scans resume editing it |
+| A group shows an old name | The group was renamed while the bot was stopped | It corrects itself within six hours, or immediately on the next command sent in that group |
 {widths:30,26,44}
 
 The first diagnostic step for any unexplained behaviour is the log:
@@ -1082,7 +1281,7 @@ projects is comfortably within Drive's quotas. Transcoding is the only expensive
 serialised deliberately; a long master occupies the worker for the duration and other work continues
 unaffected on the event loop.
 
-The known scaling limits and the points at which they would need attention are recorded in section 16.
+The known scaling limits and the points at which they would need attention are recorded in section 17.
 
 # Quality assurance
 
@@ -1098,11 +1297,11 @@ exercised without invoking a real one. Every test runs against a temporary SQLit
 
 | Module | Tests | Focus |
 |---|---|---|
-| `test_core_services.py` | 16 | Users, roles, revocation, lockout, tokens, groups, project creation and provisioning |
+| `test_core_services.py` | 23 | Users, roles, revocation, lockout, tokens, groups, group renaming, project creation and provisioning |
 | `test_validation_search_previews.py` | 8 | Leaf satisfaction, error semantics, state transitions, ranking order, preview planning and transcoding |
 | `test_jobs.py` | 2 | Scheduled scan and reminder behaviour |
-| `test_handlers.py` | 33 | End to end command and button flows through the fake Telegram application |
-| **Total** | **59** | |
+| `test_handlers.py` | 39 | End to end command and button flows through the fake Telegram application, including the live status message, two chat routing and the Lights restrictions |
+| **Total** | **72** | |
 {widths:34,12,54}
 
 ## Running the suite
@@ -1134,6 +1333,7 @@ than in the suite.
 | SQLite | Single writer | Every handler commits before awaiting, so writes are brief; write ahead logging keeps readers unblocked |
 | Previews are not retried automatically | A failed preview needs a manual request | Deliberate: an automatic retry would repeatedly download a multi gigabyte master |
 | Drive is polled, not subscribed | Changes are noticed within the scan interval | Team Leads can force an immediate check from the project menu |
+| A file listing reads six levels below the project folder | A designer who nests sub-folders more deeply than that sees the deeper levels reported as not shown | The depth covers the archive tree plus three levels of a designer's own structure, which is well beyond observed practice, and the omission is stated rather than silent |
 {widths:24,34,42}
 
 ## Risk register

@@ -750,8 +750,10 @@ def render(source: Path, out: Path, meta: DocumentMeta) -> None:
 
 
 SYSTEM = "MG Archive Bot"
-VERSION = "1.0.0"
-ISSUE_DATE = "18 September 2026"
+# The revision of these documents, which moves independently of the software release they describe.
+DOC_VERSION = "1.1"
+SOFTWARE_RELEASE = "1.0.0"
+ISSUE_DATE = "26 September 2026"
 OWNER = "Motion Graphics Ministry, Team Lead Group"
 PREPARED_BY = "Motion Graphics Archive Development Team"
 
@@ -763,13 +765,14 @@ DOCUMENTS = [
             title="Technical Documentation",
             subtitle="Architecture, data model, subsystems, security and operations for the Motion Graphics Archive Management System",
             system=SYSTEM,
-            version=VERSION,
+            version=DOC_VERSION,
             date=ISSUE_DATE,
             classification="Internal use only",
             audience="Engineering, technical reviewers and system administrators",
             owner=OWNER,
             prepared_by=PREPARED_BY,
             status="Released for review",
+            fields=[("Software release", SOFTWARE_RELEASE)],
         ),
     ),
     (
@@ -779,13 +782,14 @@ DOCUMENTS = [
             title="User Manual",
             subtitle="A step by step guide to using the Motion Graphics archive assistant on Telegram",
             system=SYSTEM,
-            version=VERSION,
+            version=DOC_VERSION,
             date=ISSUE_DATE,
             classification="Internal use only",
             audience="Designers, Team Leads and the Super Admin",
             owner=OWNER,
             prepared_by=PREPARED_BY,
             status="Released for review",
+            fields=[("Software release", SOFTWARE_RELEASE)],
         ),
     ),
 ]
