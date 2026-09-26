@@ -127,6 +127,17 @@ async def on_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             group_service.forget_unauthorised_chat(session, chat.id)
 
 
+async def on_new_chat_title(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """The group was renamed: keep the stored name current so it shows correctly in every selection."""
+    msg = update.message
+    if msg is None or not msg.new_chat_title or msg.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        return
+    with session_scope() as session:
+        changed = group_service.update_group_title(session, msg.chat.id, msg.new_chat_title)
+    if changed:
+        log.info("Group %s renamed to %r", msg.chat.id, msg.new_chat_title)
+
+
 async def on_migrate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """A group was upgraded to a supergroup: its chat_id changes, keep our records in sync."""
     msg = update.message

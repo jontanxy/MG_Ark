@@ -140,11 +140,14 @@ def migrate_group(session: Session, old_chat_id: int, new_chat_id: int) -> bool:
     return moved
 
 
-def update_group_title(session: Session, chat_id: int, title: str) -> None:
+def update_group_title(session: Session, chat_id: int, title: str) -> bool:
+    """Store the chat's current name (authorised or revoked group). Returns True when it changed."""
     group = session.get(MGGroup, chat_id)
-    if group is not None and title and group.title != title:
-        group.title = title
-        session.flush()
+    if group is None or not title or group.title == title:
+        return False
+    group.title = title
+    session.flush()
+    return True
 
 
 def note_unauthorised_chat(session: Session, chat_id: int, title: str) -> UnauthorisedChat:

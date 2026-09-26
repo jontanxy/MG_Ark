@@ -156,6 +156,23 @@ async def rebuild_sheet_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         log.warning("Nightly index rebuild failed: %s", exc)
 
 
+async def refresh_group_titles_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Ask Telegram for each authorised group's current name (renames while the bot was offline are missed otherwise)."""
+    with session_scope() as session:
+        groups = [(g.chat_id, g.title) for g in group_service.list_active_groups(session)]
+    for chat_id, old_title in groups:
+        try:
+            chat = await context.bot.get_chat(chat_id)
+        except TelegramError as exc:
+            log.info("get_chat(%s) failed: %s", chat_id, exc)
+            continue
+        title = chat.title or ""
+        if title and title != old_title:
+            with session_scope() as session:
+                group_service.update_group_title(session, chat_id, title)
+            log.info("Group %s renamed: %r -> %r", chat_id, old_title, title)
+
+
 async def leave_stale_chats_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     settings = settings_of(context)
     if settings.unauthorised_group_leave_minutes <= 0:

@@ -22,7 +22,7 @@ from ..config import Settings
 from ..services.drive import DriveClient
 from ..util import resolve_tz
 from .handlers import admin, auth, common, group_mode, mg_groups, projects, search, text_router
-from .jobs import PreviewWorker, leave_stale_chats_job, rebuild_sheet_job, reminder_job, scan_job
+from .jobs import PreviewWorker, leave_stale_chats_job, rebuild_sheet_job, refresh_group_titles_job, reminder_job, scan_job
 
 log = logging.getLogger(__name__)
 
@@ -126,6 +126,7 @@ def register_handlers(app: Application) -> None:
 
     app.add_handler(ChatMemberHandler(mg_groups.on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.StatusUpdate.MIGRATE, mg_groups.on_migrate))
+    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_TITLE, mg_groups.on_new_chat_title))
     app.add_handler(MessageHandler(private & filters.TEXT & ~filters.COMMAND, text_router.route_text))
     app.add_handler(MessageHandler(private & filters.COMMAND, common.unknown_private_command))
     app.add_error_handler(common.error_handler)
@@ -139,6 +140,7 @@ def register_jobs(app: Application, settings: Settings, tz) -> None:
     jq.run_repeating(scan_job, interval=settings.scan_interval_minutes * 60, first=120, name="scan")
     jq.run_daily(reminder_job, time=time(hour=settings.reminder_hour, minute=0, tzinfo=tz), name="reminders")
     jq.run_repeating(leave_stale_chats_job, interval=600, first=300, name="leave-stale-chats")
+    jq.run_repeating(refresh_group_titles_job, interval=6 * 3600, first=30, name="refresh-group-titles")
     jq.run_daily(rebuild_sheet_job, time=time(hour=3, minute=30, tzinfo=tz), name="rebuild-sheet")
 
 

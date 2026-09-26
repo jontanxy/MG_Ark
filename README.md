@@ -132,8 +132,13 @@ On first start the access password is seeded from `INITIAL_ACCESS_PASSWORD`; aft
 **Team Lead (private chat)**
 
 * `/newproject` — where it lives (top level, an existing collection, or a new collection such as `BF`) → name →
-  toggle Timeline / Contin Videos / Contin Lyrics / PSD → (pick MG Group) → optional metadata → assign designers →
-  **Create archive**. Folders are created and the announcement with folder links is posted.
+  toggle Timeline / Contin Videos / Contin Lyrics / PSD → **pick the MG Group** (every authorised group is listed;
+  the project is never linked to a chat silently) → optional metadata → assign designers → **Create archive**.
+  Folders are created and the announcement with folder links is posted to the chosen group only.
+* One Team Lead can run several projects with separate group chats: each chat must be authorised once
+  (`/creategroup` → add the bot to that group, or `/activate <token>` inside it) and then appears as a choice in the
+  wizard and under **MG group** in the project menu. Renaming a group in Telegram is picked up automatically (from the
+  rename notice, from any command used in the group, and by a 6-hourly check), so selections always show current names.
 * **Collections** group sub-projects in one folder: `BF/Opening/…`, `BF/Worship/…`. Each sub-project keeps its own
   declarations, tracking, previews and verification; its Collection metadata is set automatically, so `/search bf`
   finds all of them. A collection folder that already exists under the root is re-used.

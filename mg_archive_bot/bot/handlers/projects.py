@@ -221,14 +221,20 @@ def _load_draft(session: Session, context: ContextTypes.DEFAULT_TYPE, actor: Use
     return project
 
 
+GROUP_HINT = (
+    "<i>Don't see the right group? Send /creategroup to get a token, then add me to that Telegram group "
+    "(or send <code>/activate &lt;token&gt;</code> inside it). You can also change the group later from the project menu.</i>"
+)
+
+
 async def _wizard_group_step(update: Update, context: ContextTypes.DEFAULT_TYPE, session: Session, project: Project) -> None:
+    """Always let the Team Lead pick the group — a project is never linked to a chat silently."""
     groups = group_service.list_active_groups(session)
-    if len(groups) > 1:
-        await safe_edit(update, "💬 Which MG Group should receive announcements and progress?", group_choice_keyboard(groups, "nw:grp"))
-        return
-    project_service.set_group(session, project, groups[0].chat_id if groups else None)
-    session.commit()
-    await _wizard_meta_step(update, context, project, note="" if groups else "ℹ️ No MG Group is authorised yet — you can link one later from the project menu.\n\n")
+    if groups:
+        text = f"💬 Which MG Group should receive this project's announcements and progress?\n\n{GROUP_HINT}"
+    else:
+        text = f"💬 No MG Group is authorised yet, so this project can't be announced anywhere for now.\n\n{GROUP_HINT}"
+    await safe_edit(update, text, group_choice_keyboard(groups, "nw:grp"))
 
 
 async def _wizard_meta_step(update: Update, context: ContextTypes.DEFAULT_TYPE, project: Project, note: str = "") -> None:
@@ -293,7 +299,7 @@ async def _wizard_summary(update: Update, context: ContextTypes.DEFAULT_TYPE, se
         note + f"📋 <b>Ready to create: {esc(project.full_name)}</b>",
         "",
         f"<b>Declared assets:</b> {esc(', '.join(declared) if declared else 'Working files only')}",
-        f"<b>MG Group:</b> {esc(group.title) if group else 'none'}",
+        f"<b>MG Group:</b> {esc(group.title) if group else 'none — nothing will be announced'}",
         f"<b>Assigned:</b> {esc(', '.join(u.display_name for u in who) if who else 'nobody yet')}",
         f"<b>Tags:</b> {esc(', '.join(project.tag_names) if project.tags else '—')}",
         "",
@@ -587,9 +593,11 @@ async def project_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, a
             await query.answer()
             groups = group_service.list_active_groups(session)
             if not groups:
-                await safe_edit(update, "No MG Group is authorised yet. Run /creategroup first.", back_to_project_keyboard(project.id))
+                await safe_edit(update, f"No MG Group is authorised yet.\n\n{GROUP_HINT}", back_to_project_keyboard(project.id))
                 return
-            await safe_edit(update, "💬 Which MG Group should receive this project's announcements?", group_choice_keyboard(groups, f"pj:{project.id}:grp"))
+            current = group_service.get_group(session, project.mg_group_chat_id) if project.mg_group_chat_id else None
+            now = f"Currently: <b>{esc(current.title)}</b>\n\n" if current else ""
+            await safe_edit(update, f"💬 Which MG Group should receive this project's announcements?\n{now}{GROUP_HINT}", group_choice_keyboard(groups, f"pj:{project.id}:grp"))
 
         elif action == "grp":
             try:

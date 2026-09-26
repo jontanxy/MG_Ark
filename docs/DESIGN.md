@@ -160,6 +160,7 @@ Each result:
 * The group gate exempts `/activate` (it still requires an ACTIVE Team Lead / Super Admin) and the `my_chat_member` / migration service updates.
 * Basic group → supergroup migration (chat id changes) is handled twice: a `StatusUpdate.MIGRATE` handler re-keys `mg_groups.chat_id` and `projects.mg_group_chat_id`, and every group send catches `ChatMigrated`, re-keys, and retries.
 * A group revoked by the Super Admin cannot be re-activated with a Team Lead token; the Super Admin restores it from `/groups`. A group the bot was merely removed from can be re-activated with a fresh token.
+* Group titles are kept current three ways: the `new_chat_title` service message (a `StatusUpdate.NEW_CHAT_TITLE` handler), the chat title attached to every group command (synced in the access gate), and a 6-hourly `get_chat` refresh that covers renames made while the bot was offline.
 
 ## 9. Authentication flow
 
@@ -180,7 +181,7 @@ Bot in a chat with no authorisation and no valid token within `UNAUTHORISED_GROU
 0. Location: top level, an existing collection, or a new collection name (folder under the root).
 1. Name (text, 2–100 chars, unique within that location).
 2. Asset declaration: inline toggles Timeline / Contin Videos / Contin Lyrics / PSD, then "Continue".
-3. MG group: auto if exactly one ACTIVE group; else pick (or "none — announce later").
+3. MG group: always an explicit choice among the ACTIVE groups (or "none — announce later"), with a hint on how to authorise a missing group. Nothing is auto-linked, so a Team Lead running several projects with separate chats always sees where the announcement will go.
 4. Optional metadata (event, collection, ministry, style, colours, tags, description) via "Add metadata now" / "Skip". Year defaults to current year; creator defaults to creator's name; asset types derived.
 5. Assign designers: multi-select of ACTIVE users (category ALL); refine per-category later from project menu.
 6. Confirm → folders created on Drive (in a worker thread) → project ACTIVE → announcement posted to the MG group (folder links, required assets, assigned designers) → Team Lead gets the link summary.
