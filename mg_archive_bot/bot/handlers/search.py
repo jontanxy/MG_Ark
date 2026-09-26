@@ -6,7 +6,9 @@ import logging
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from ...constants import Role
+from telegram.error import BadRequest
+
+from ...constants import ProjectStatus, Role
 from ...db import session_scope
 from ...models import User
 from ...services import notifications
@@ -14,8 +16,8 @@ from ...services import projects as project_service
 from ...services import search as search_service
 from ...services.validation import latest_report
 from ...util import esc, normalise_terms
-from ..access import require, set_prompt, settings_of
-from ..actions import project_file_listing, send_preview, tree_of, user_by_id
+from ..access import parse_int, require, set_prompt, settings_of
+from ..actions import may_list_files, project_file_listing, send_preview, tree_of, user_by_id
 from ..keyboards import more_results_keyboard, previews_keyboard, search_card_keyboard
 
 log = logging.getLogger(__name__)
@@ -33,13 +35,16 @@ async def _send_results(update: Update, context: ContextTypes.DEFAULT_TYPE, quer
     page_size = settings.search_page_size
     chat_id = update.effective_chat.id
     terms = normalise_terms(query)
+    shown = " + ".join(terms)
+    if len(shown) > 200:
+        shown = shown[:200] + "…"
     with session_scope() as session:
         hits = search_service.search_projects(session, query)
         total = len(hits)
         chunk = hits[page * page_size : (page + 1) * page_size]
         if not chunk:
             text = (
-                f"🔍 No projects match <b>{esc(' + '.join(terms))}</b>."
+                f"🔍 No projects match <b>{esc(shown)}</b>."
                 if page == 0
                 else "No more results."
             )
@@ -47,7 +52,7 @@ async def _send_results(update: Update, context: ContextTypes.DEFAULT_TYPE, quer
             return
         if page == 0:
             await context.bot.send_message(
-                chat_id, f"🔍 <b>{total} result{'s' if total != 1 else ''}</b> for <b>{esc(' + '.join(terms))}</b>"
+                chat_id, f"🔍 <b>{total} result{'s' if total != 1 else ''}</b> for <b>{esc(shown)}</b>"
             )
         for i, hit in enumerate(chunk):
             is_last = i == len(chunk) - 1
@@ -88,7 +93,10 @@ async def handle_search_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
 @require(scope="private")
 async def search_page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, actor: User) -> None:
     query = update.callback_query
-    page = int(query.data.split(":")[1])
+    page = parse_int(query.data.split(":")[1])
+    if page is None or page > 10_000:
+        await query.answer("Invalid request.", show_alert=True)
+        return
     saved = context.user_data.get("search_query")
     if not saved:
         await query.answer("Search again with /search.", show_alert=True)
@@ -96,19 +104,23 @@ async def search_page_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.answer()
     try:
         await query.edit_message_reply_markup(None)
-    except Exception:  # pragma: no cover - cosmetic
-        pass
+    except BadRequest as exc:  # cosmetic: the "more" button may already be gone
+        log.debug("could not remove pagination button: %s", exc)
     await _send_results(update, context, saved, page, actor)
 
 
 @require(scope="private")
 async def search_result_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, actor: User) -> None:
     query = update.callback_query
-    _, project_id, action = query.data.split(":")
+    _, raw_id, action = query.data.split(":")
+    project_id = parse_int(raw_id)
+    if project_id is None:
+        await query.answer("Invalid request.", show_alert=True)
+        return
     with session_scope() as session:
-        project = project_service.get_project(session, int(project_id))
-        if project is None:
-            await query.answer("Project not found.", show_alert=True)
+        project = project_service.get_project(session, project_id)
+        if project is None or project.status in (ProjectStatus.DRAFT, ProjectStatus.CANCELLED):
+            await query.answer("Project not found.", show_alert=True)  # drafts/cancelled are not searchable either
             return
         if action == "prev":
             ready = project.ready_previews
@@ -129,6 +141,9 @@ async def search_result_callback(update: Update, context: ContextTypes.DEFAULT_T
             await query.answer(LIGHTS_ONLY_PREVIEW, show_alert=True)  # crafted button data gets nothing extra
             return
         elif action == "files":
+            if not may_list_files(context, actor.telegram_id):
+                await query.answer("Please wait a minute before requesting another file listing.", show_alert=True)
+                return
             await query.answer("Reading Google Drive…")
             for chunk in await project_file_listing(context, project):
                 await query.message.reply_text(chunk)

@@ -11,7 +11,7 @@ from ...db import session_scope
 from ...models import User
 from ...services import projects as project_service
 from ...util import esc
-from ..access import clear_prompt, is_group, is_private, require, resolve_actor
+from ..access import clear_prompt, is_group, is_private, may_reply_to_unregistered, require, resolve_actor
 
 log = logging.getLogger(__name__)
 
@@ -65,7 +65,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     actor = resolve_actor(update, context)
     if actor is None or not actor.is_active:
-        await update.message.reply_text("Send /start to register with the access password.")
+        if may_reply_to_unregistered(context, update.effective_user.id):
+            await update.message.reply_text("Send /start to register with the access password.")
         return
     await update.message.reply_text(help_text(actor, private=True))
 
@@ -90,24 +91,29 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE, actor: 
 
 
 async def unknown_private_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if is_private(update) and update.message is not None:
-        await update.message.reply_text("Unknown command. Send /help to see what I can do.")
+    if not is_private(update) or update.message is None:
+        return
+    actor = resolve_actor(update, context)
+    if (actor is None or not actor.is_active) and not may_reply_to_unregistered(context, update.effective_user.id):
+        return  # unknown senders never get more than one reply per interval
+    await update.message.reply_text("Unknown command. Send /help to see what I can do.")
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     err = context.error
-    if isinstance(err, (NetworkError, TimedOut)):
+    if isinstance(err, BadRequest):  # Telegram rejected something we sent (e.g. too long); details stay in the log
+        log.warning("Telegram rejected a request: %s", err)
+    elif isinstance(err, (NetworkError, TimedOut)):
         log.warning("Network error: %s", err)
         return
-    if isinstance(err, Forbidden):
+    elif isinstance(err, Forbidden):
         log.info("Forbidden: %s", err)
         return
-    log.exception("Unhandled error while processing update %s", getattr(update, "update_id", "?"), exc_info=err)
-    if isinstance(update, Update) and update.effective_chat is not None and is_private(update):
-        try:
-            text = "⚠️ Something went wrong. Please try again."
-            if isinstance(err, BadRequest):
-                text += f"\n<code>{str(err)[:200]}</code>"
-            await context.bot.send_message(update.effective_chat.id, text)
+    else:
+        log.exception("Unhandled error while processing update %s", getattr(update, "update_id", "?"), exc_info=err)
+    chat = getattr(update, "effective_chat", None)
+    if chat is not None and is_private(update):
+        try:  # generic text only: internal details never reach users
+            await context.bot.send_message(chat.id, "⚠️ Something went wrong. Please try again.")
         except Exception:  # pragma: no cover - best effort
             log.debug("could not report error to user")

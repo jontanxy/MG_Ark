@@ -103,8 +103,12 @@ def test_password_change_rules(db):
     with session_scope() as s:
         with pytest.raises(user_service.UserError):
             user_service.set_access_password(s, "short")
-        user_service.set_access_password(s, "new-password-9")
-        assert user_service.verify_access_password(s, "new-password-9")
+        with pytest.raises(user_service.UserError):
+            user_service.set_access_password(s, "change-me-please")  # the .env.example placeholder
+        with pytest.raises(user_service.UserError):
+            user_service.set_access_password(s, "aaaaaaaaaaaaaaaa")  # too repetitive
+        user_service.set_access_password(s, "new-password-9!!")
+        assert user_service.verify_access_password(s, "new-password-9!!")
         assert not user_service.verify_access_password(s, PASSWORD)
         assert user_service.seed_password_if_missing(s, "ignored") is False
 
@@ -391,7 +395,7 @@ async def test_file_listing_tree_and_rendering(db, settings, drive):
         deep = drive.create_folder(f"level{i}", deep).id
     drive.put_file(deep, "buried.txt", size=1)
     text = render_listing("Listing", build_listing(drive, root_id, name, known, order))[0]
-    assert "level3" in text and "buried.txt" not in text and "deeper folders not shown" in text
+    assert "level3" in text and "buried.txt" not in text and "not everything is shown" in text
     # long listings are split into numbered messages
     for i in range(400):
         drive.put_file(f["lyrics_png"], f"lyric_{i:03d}.png", size=1_000)

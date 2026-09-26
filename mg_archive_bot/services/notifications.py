@@ -12,13 +12,21 @@ from ..constants import (
     folder_path_label,
 )
 from ..models import Project, User
-from ..util import esc, fmt_dt, mention
+from ..util import clip_message, esc, fmt_dt, mention
 from .projects import assignees_for, required_leaves
 from .validation import ValidationReport
 
 
+MAX_MENTIONS = 15
+MAX_DESCRIPTION_SHOWN = 600
+
+
 def _mentions(users: list[User]) -> str:
-    return ", ".join(mention(u.telegram_id, u.display_name) for u in users) if users else "—"
+    if not users:
+        return "—"
+    shown = ", ".join(mention(u.telegram_id, u.display_name) for u in users[:MAX_MENTIONS])
+    extra = len(users) - MAX_MENTIONS
+    return shown + (f" +{extra} more" if extra > 0 else "")
 
 
 def status_line(project: Project) -> str:
@@ -46,7 +54,7 @@ def announcement(project: Project, tree: list[FolderSpec]) -> str:
     lines.append(f"👥 <b>Assigned:</b> {_mentions(everyone)}")
     lines.append("")
     lines.append("Upload your files into the folders above. I check Google Drive automatically and will post progress here.")
-    return "\n".join(lines)
+    return clip_message("\n".join(lines))
 
 
 def progress_block(project: Project, report: ValidationReport, tree: list[FolderSpec], *, with_links: bool = False) -> list[str]:
@@ -84,7 +92,7 @@ def progress_message(project: Project, report: ValidationReport, tree: list[Fold
     else:
         lines.append("All declared assets are uploaded — awaiting Team Lead verification.")
     lines.append(f"<i>Checked {esc(fmt_dt(project.last_validated_at, tz))}</i>")
-    return "\n".join(lines)
+    return clip_message("\n".join(lines))
 
 
 def reminder_message(project: Project, report: ValidationReport, tree: list[FolderSpec]) -> str:
@@ -96,7 +104,7 @@ def reminder_message(project: Project, report: ValidationReport, tree: list[Fold
         lines.append(f"❌ {label}" + (f"  👤 {_mentions(who)}" if who else ""))
     if project.drive_link:
         lines += ["", f'📁 <a href="{project.drive_link}">Project folder</a>']
-    return "\n".join(lines)
+    return clip_message("\n".join(lines))
 
 
 def ready_message(project: Project) -> str:
@@ -141,7 +149,8 @@ def project_details(project: Project, report: ValidationReport | None, tree: lis
         if value:
             lines.append(f"<b>{label}:</b> {esc(value)}")
     if project.description:
-        lines += ["", esc(project.description)]
+        shown = project.description[:MAX_DESCRIPTION_SHOWN] + ("…" if len(project.description) > MAX_DESCRIPTION_SHOWN else "")
+        lines += ["", esc(shown)]
     declared = [CATEGORY_LABELS[c] for c in (AssetCategory.TIMELINE, AssetCategory.CONTIN_VIDEOS, AssetCategory.CONTIN_LYRICS, AssetCategory.PSD) if project.flag({AssetCategory.TIMELINE: "has_timeline", AssetCategory.CONTIN_VIDEOS: "has_contin_videos", AssetCategory.CONTIN_LYRICS: "has_contin_lyrics", AssetCategory.PSD: "has_psd"}[c])]
     lines += ["", f"<b>Declared assets:</b> {esc(', '.join(declared) if declared else 'Working files only')}"]
     ready = project.ready_previews
@@ -157,10 +166,10 @@ def project_details(project: Project, report: ValidationReport | None, tree: lis
         lines.append(f"<b>Cancelled:</b> {esc(fmt_dt(project.cancelled_at, tz))} — Drive folder in the trash")
     if report is not None:
         lines += ["", "<b>Latest check</b>"] + progress_block(project, report, tree) + [f"<i>{esc(fmt_dt(project.last_validated_at, tz))}</i>"]
-    return "\n".join(lines)
+    return clip_message("\n".join(lines))
 
 
 def search_result_card(project: Project) -> str:
     n = len(project.ready_previews)
     previews = f"{n} preview{'s' if n != 1 else ''} available" if n else "no previews yet"
-    return f"🎬 <b>{esc(project.full_name)}</b>\n\n{tags_line(project)}\n\n{previews} · {status_line(project)}"
+    return clip_message(f"🎬 <b>{esc(project.full_name)}</b>\n\n{tags_line(project)}\n\n{previews} · {status_line(project)}")

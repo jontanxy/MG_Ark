@@ -42,6 +42,15 @@ cp .env.example .env
 
 Edit `.env`: set `TELEGRAM_BOT_TOKEN`, `SUPER_ADMIN_TELEGRAM_ID`, `INITIAL_ACCESS_PASSWORD`, and the Google settings from §3.
 
+### Dependencies
+
+`requirements.txt` lists direct dependencies; `requirements.lock` is the fully pinned, hash-verified set used by the
+Docker image (`pip install --require-hashes -r requirements.lock`). Regenerate it after changing `requirements.txt`:
+
+```bash
+pip install pip-tools && pip-compile --generate-hashes --strip-extras -o requirements.lock requirements.txt
+```
+
 ## 3. Google Drive access
 
 Two supported modes. Pick one.
@@ -97,6 +106,9 @@ for your work account so you can do steps 1–2 there.
    sign in with the account that owns the archive, and copy the produced `secrets/oauth-token.json` to the bot host.
 3. Set `GOOGLE_AUTH_MODE=oauth` and `DRIVE_ROOT_FOLDER_ID`.
 
+Use a **dedicated Google account** that only has access to the archive folder: the token grants the bot that
+account's *entire* Drive, and it is stored on the bot host (file mode 0600, keep it that way).
+
 ### Option C — Try it without Google
 
 `GOOGLE_AUTH_MODE=fake` runs the whole bot against an in-memory Drive: every flow works in Telegram, nothing is written to
@@ -109,10 +121,11 @@ source .venv/bin/activate
 python -m mg_archive_bot
 ```
 
-Or with Docker (ffmpeg included):
+Or with Docker (ffmpeg included; the container runs as an unprivileged user with all capabilities dropped and a
+read-only image, so make the mounted directories accessible to uid 10001 first):
 
 ```bash
-docker compose up -d --build
+chown -R 10001 data secrets && docker compose up -d --build
 ```
 
 On first start the access password is seeded from `INITIAL_ACCESS_PASSWORD`. **Editing `.env` later does not change
@@ -235,12 +248,24 @@ The suite (53 tests) covers services, validation/state machine, search ranking, 
   logged or sent to users. The service account can only reach the Drive folder shared with it.
 * **Access** requires the shared password once per Telegram account; 5 wrong attempts lock that account for
   15 minutes and alert the Super Admin. 30 wrong attempts across all accounts within 10 minutes pause registration
-  for 15 minutes (one alert). Revoked accounts cannot re-register. Unknown senders get at most one reply per minute.
+  for 15 minutes (one alert). Revoked accounts cannot re-register, receive no DMs and drop out of every assignment.
+  Unknown or revoked senders get at most one reply per minute. The password must be at least 12 characters and not a
+  well-known placeholder; the bot refuses to start with the `.env.example` password or example ids still in place.
+* **Resource limits**: file listings are bounded (200 folders / 2 000 files, 4 messages, 2 per user per minute),
+  `/status` re-posts at most once per minute per group, previews skip sources under 1 MB or over 20 GB and queue at
+  most 20 per project per scan, and outgoing messages go through Telegram flood control.
+* **Logging**: `LOG_LEVEL=DEBUG` only affects the bot's own messages; the Telegram library is kept at INFO so message
+  text (including passwords) is never written to the log. Google API errors shown to users carry no URLs or ids.
 * **Authorisation** is checked server-side for every command and every button press (crafted button data is
   rejected), the Super Admin is pinned to `SUPER_ADMIN_TELEGRAM_ID`, and group commands need both an authorised user
   and an authorised MG Group. Unauthorised groups the bot is added to are left after an hour.
-* **Input handling**: all user text is HTML-escaped, database access is parameterised, and Drive file names are never
-  used as local paths.
+* **Input handling**: all user text is HTML-escaped, database access is parameterised, Drive file names are never
+  used as local paths, button data is validated before use, and every user-influenced message is bounded (search
+  terms, tags, mentions, descriptions are capped and messages are clipped under Telegram's limit).
+* **Files the bot creates** (database, log, work directory) are private to its user; the Docker image runs as an
+  unprivileged user. `/activate` token attempts are rate-limited.
+* A full write-up of the security review, its methodology and residual risks is in `docs/SECURITY_REVIEW.md`; the
+  abuse cases run as regression tests in `tests/test_security.py`.
 * **What to do if something leaks**: bot token → regenerate it in @BotFather and update `.env`; service-account key →
   delete it in the Cloud Console *Keys* tab and download a new one; access password → `/setpassword` and revoke any
   unexpected users in `/users`.
