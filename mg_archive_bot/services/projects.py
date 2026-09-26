@@ -155,8 +155,12 @@ def declared_categories(project: Project) -> list[AssetCategory]:
 # ----------------------------------------------------------------------------------------
 
 
+MAX_TAGS = 20
+MAX_TAG_LENGTH = 40
+
+
 def set_tags(session: Session, project: Project, raw: str) -> list[str]:
-    names = normalise_terms(raw)
+    names = normalise_terms(raw, max_terms=MAX_TAGS, max_length=MAX_TAG_LENGTH)
     tags: list[Tag] = []
     for name in names:
         tag = session.scalar(select(Tag).where(Tag.name == name))
@@ -216,6 +220,8 @@ def toggle_assignment(session: Session, project: Project, user_id: int, category
         raise ProjectError("User not found.")
     if user.role not in CONTRIBUTOR_ROLES:
         raise ProjectError(f"{user.display_name} has the {ROLE_LABELS[user.role]} role and cannot be assigned assets.")
+    if not user.is_active:
+        raise ProjectError(f"{user.display_name}'s access has been revoked.")
     a = Assignment(project_id=project.id, user_id=user_id, category=category)
     session.add(a)
     project.assignments.append(a)
@@ -227,6 +233,8 @@ def assignees_for(project: Project, category: AssetCategory | None) -> list[User
     """Users responsible for *category* (explicit or via ALL). ``None`` returns everyone assigned."""
     seen: dict[int, User] = {}
     for a in project.assignments:
+        if a.user is None or not a.user.is_active or a.user.role not in CONTRIBUTOR_ROLES:
+            continue  # never mention revoked or view-only people
         if category is None or a.category == AssetCategory.ALL or a.category == category:
             seen.setdefault(a.user_id, a.user)
     return sorted(seen.values(), key=lambda u: u.display_name.lower())
@@ -272,6 +280,7 @@ async def provision_folders(session: Session, project: Project, drive: DriveClie
         from .collections import ensure_collection_folder  # local import: collections depends on projects
 
         collection = await ensure_collection_folder(session, project.collection_folder, drive, settings)
+        session.commit()  # the collection folder is real now; never hold its write open across the tree build
         root_parent = collection.drive_id
     tree = build_folder_tree(settings.folder_names())
     flags = {spec.key: (spec.create_when is None or project.flag(spec.create_when)) for spec in tree}

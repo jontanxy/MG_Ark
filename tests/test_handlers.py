@@ -232,7 +232,9 @@ async def test_setpassword_flow(harness):
     bot = harness.bot
     await harness.command(ADMIN, "/setpassword")
     update = await harness.text(ADMIN, "short")
-    assert update.message.deleted and "at least 8 characters" in bot.last(ADMIN.id)["text"]
+    assert update.message.deleted and "at least 12 characters" in bot.last(ADMIN.id)["text"]
+    await harness.text(ADMIN, "change-me-please")
+    assert "placeholder" in bot.last(ADMIN.id)["text"]
     await harness.text(ADMIN, "brand-new-password")
     assert "Access password updated" in bot.last(ADMIN.id)["text"]
     with session_scope() as s:
@@ -753,10 +755,16 @@ async def test_group_status_reuses_recent_check(harness, authorised_group):
     await harness.command(DESIGNER, "/status", chat=GROUP)
     with session_scope() as s:
         runs = s.query(ValidationRun).count()
-    await harness.command(DESIGNER, "/status", chat=GROUP)  # within the cooldown → no new Drive scan
+    live = harness.bot.last(GROUP.id)
+    assert live["text"].startswith("📊")
+    await harness.command(DESIGNER, "/status", chat=GROUP)  # within the cooldown → no new scan, no re-post
     with session_scope() as s:
         assert s.query(ValidationRun).count() == runs
-    assert harness.bot.last(GROUP.id)["text"].startswith("📊")
+    assert "refreshed less than a minute ago" in harness.bot.last(GROUP.id)["text"]
+    assert (GROUP.id, live["message_id"]) not in harness.bot.deleted
+    for _ in range(5):  # the same person asking again and again is answered at most 3 times per 10 min
+        await harness.command(DESIGNER, "/status", chat=GROUP)
+    assert sum("refreshed less than" in t for t in harness.bot.texts(GROUP.id)) == 3
     harness.bot_data.pop("limiters", None)
     await harness.command(DESIGNER, "/status", chat=GROUP)
     with session_scope() as s:
@@ -1076,10 +1084,14 @@ async def test_file_listing_from_menu_search_and_group(harness, authorised_group
     drive.put_file(folders["ae"], "opening.aep", size=2_000)
     await harness.press(DESIGNER, f"sr:{pid}:files")
     assert "opening.aep" not in bot.last(DESIGNER.id)["text"]
+    q = await harness.press(DESIGNER, f"sr:{pid}:files")  # third request inside a minute: budget exhausted
+    assert q.answers[-1] == ("Please wait a minute before requesting another file listing.", True)
     harness.bot_data.pop("file_listings", None)
+    harness.bot_data.pop("limiters", None)
     await harness.press(DESIGNER, f"sr:{pid}:files")
     assert "opening.aep" in bot.last(DESIGNER.id)["text"]
     # group /files: any authorised member, authorised group only
+    harness.bot_data.pop("limiters", None)
     await harness.command(DESIGNER, "/files", chat=GROUP)
     assert "opening.aep" in bot.last(GROUP.id)["text"] and "Open project folder" in bot.last(GROUP.id)["text"]
     await harness.command(STRANGER, "/files", chat=GROUP)
@@ -1091,6 +1103,7 @@ async def test_file_listing_from_menu_search_and_group(harness, authorised_group
     await harness.press(LEAD, f"pj:{pid}:revoke2")
     q = await harness.press(LEAD, f"pj:{pid}:files")
     assert q.answers[-1] == ("This project's folder is in the Drive trash.", True)
+    harness.bot_data.pop("limiters", None)
     await harness.command(DESIGNER, "/files", chat=GROUP)
     assert "No open archives" in bot.last(GROUP.id)["text"]
 

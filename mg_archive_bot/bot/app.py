@@ -8,6 +8,7 @@ from telegram import BotCommand, BotCommandScopeAllGroupChats, BotCommandScopeAl
 from telegram.constants import ParseMode
 from telegram.error import TelegramError
 from telegram.ext import (
+    AIORateLimiter,
     Application,
     ApplicationBuilder,
     CallbackQueryHandler,
@@ -85,6 +86,7 @@ def build_application(settings: Settings, drive: DriveClient, sheets=None) -> Ap
         .post_init(_post_init)
         .post_shutdown(_post_shutdown)
         .concurrent_updates(True)
+        .rate_limiter(AIORateLimiter(max_retries=3))  # queue bursts instead of tripping Telegram's flood limits
         .read_timeout(30)
         .write_timeout(60)
         .media_write_timeout(900)

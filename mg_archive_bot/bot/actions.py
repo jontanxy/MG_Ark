@@ -5,6 +5,7 @@ import asyncio
 import hashlib
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
@@ -23,7 +24,7 @@ from ..services.previews import PreviewJob, PreviewOrphan, plan_previews, remove
 from ..services.sheets import spreadsheet_url
 from ..services.validation import ScanResult, latest_report, validate_project
 from ..util import esc, human_size
-from .access import drive_of, project_lock, settings_of
+from .access import drive_of, limiter, project_lock, settings_of
 
 log = logging.getLogger(__name__)
 
@@ -75,7 +76,7 @@ OUTDATED_STATUS = "📊 <i>Outdated — see the latest status message below.</i>
 
 
 def _digest(text: str) -> str:
-    return hashlib.sha1(text.encode("utf-8")).hexdigest()[:20]
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:24]
 
 
 def live_status_text(context: ContextTypes.DEFAULT_TYPE, project: Project, report) -> str:
@@ -150,8 +151,14 @@ async def refresh_live_status_from_latest(context: ContextTypes.DEFAULT_TYPE, se
 
 
 async def notify_user(context: ContextTypes.DEFAULT_TYPE, user_id: int | None, text: str) -> None:
+    """DM a registered, ACTIVE user. Revoked or unknown users never receive project information."""
     if user_id is None:
         return
+    with session_scope() as session:
+        user = session.get(User, user_id)
+        if user is None or not user.is_active:
+            log.info("Not notifying user %s: not an active user", user_id)
+            return
     try:
         await context.bot.send_message(user_id, text)
     except TelegramError as exc:
@@ -188,7 +195,16 @@ async def check_project(
         result = await validate_project(session, project, drive, settings)
         jobs: list[PreviewJob] = []
         if queue_previews and settings.previews_enabled and not result.report.had_errors:
-            jobs = plan_previews(session, project, result.source_files, force=force_previews, orphans=orphans)
+            jobs = plan_previews(
+                session,
+                project,
+                result.source_files,
+                force=force_previews,
+                orphans=orphans,
+                min_size=settings.preview_min_source_bytes,
+                max_size=settings.preview_max_source_bytes,
+                max_jobs=settings.preview_max_per_scan,
+            )
         session.commit()
     outcome = CheckOutcome(result)
     if result.old_status != result.new_status:
@@ -234,23 +250,50 @@ def user_by_id(session: Session, user_id: int | None) -> User | None:
     return session.get(User, user_id) if user_id is not None else None
 
 
+def _listing_executor(context: ContextTypes.DEFAULT_TYPE) -> ThreadPoolExecutor:
+    """Listings run on their own small pool so they can never starve scans, provisioning and previews."""
+    pool = context.bot_data.get("listing_executor")
+    if pool is None:
+        pool = context.bot_data["listing_executor"] = ThreadPoolExecutor(max_workers=2, thread_name_prefix="listing")
+    return pool
+
+
+def may_list_files(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
+    settings = settings_of(context)
+    return limiter(context, "files_user", settings.files_per_user_per_minute, 60).allow(user_id)
+
+
 async def project_file_listing(context: ContextTypes.DEFAULT_TYPE, project: Project) -> list[str]:
-    """Telegram-ready listing of the project's Drive folder; re-read from Drive at most once per cooldown window."""
+    """Telegram-ready listing of the project's Drive folder.
+
+    Single-flight per project (concurrent callers share one walk), re-read from Drive at most once per
+    cooldown window, bounded in folders/files/messages, and run on a dedicated small thread pool.
+    """
     settings = settings_of(context)
     cache: dict[int, tuple[float, list[str]]] = context.bot_data.setdefault("file_listings", {})
-    hit = cache.get(project.id)
-    if hit and time.monotonic() - hit[0] < settings.status_cooldown_seconds:
-        return hit[1]
+
+    def cached() -> list[str] | None:
+        hit = cache.get(project.id)
+        return hit[1] if hit and time.monotonic() - hit[0] < settings.status_cooldown_seconds else None
+
+    if (chunks := cached()) is not None:
+        return chunks
     if not project.drive_root_id:
         return [f"📂 <b>{esc(project.full_name)}</b> has no Google Drive folder."]
-    key_order = {spec.key: i for i, spec in enumerate(tree_of(context))}
-    known = {f.drive_id: f.key for f in project.folders}
-    root = await asyncio.to_thread(build_listing, drive_of(context), project.drive_root_id, project.name, known, key_order)
-    if root.error:
-        return [f"⚠️ Could not read Google Drive for <b>{esc(project.full_name)}</b>: {esc(root.error[:300])}"]
-    chunks = render_listing(project.full_name, root)
-    cache[project.id] = (time.monotonic(), chunks)
-    return chunks
+    async with project_lock(context, project.id):
+        if (chunks := cached()) is not None:  # filled while we waited
+            return chunks
+        key_order = {spec.key: i for i, spec in enumerate(tree_of(context))}
+        known = {f.drive_id: f.key for f in project.folders}
+        loop = asyncio.get_running_loop()
+        root = await loop.run_in_executor(
+            _listing_executor(context), build_listing, drive_of(context), project.drive_root_id, project.name, known, key_order
+        )
+        if root.error:
+            return [f"⚠️ Could not read Google Drive for <b>{esc(project.full_name)}</b>: {esc(root.error[:200])}"]
+        chunks = render_listing(project.full_name, root, max_chunks=settings.files_max_chunks)
+        cache[project.id] = (time.monotonic(), chunks)
+        return chunks
 
 
 # ----------------------------------------------------------------------------------------

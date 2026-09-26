@@ -35,6 +35,26 @@ GROUP_TYPES = {ChatType.GROUP, ChatType.SUPERGROUP}
 # ----------------------------------------------------------------------------------------
 
 
+def parse_int(value: str | None, *, max_digits: int = 18) -> int | None:
+    """Parse an integer from callback data; None for anything malformed or absurdly long."""
+    if value is None:
+        return None
+    body = value[1:] if value.startswith("-") else value
+    if not body.isdigit() or len(body) > max_digits:
+        return None
+    return int(value)
+
+
+def parse_enum(enum_cls, value: str | None):
+    """Return the enum member for *value*, or None when it is not a valid member."""
+    if value is None:
+        return None
+    try:
+        return enum_cls(value)
+    except ValueError:
+        return None
+
+
 def settings_of(context: ContextTypes.DEFAULT_TYPE) -> Settings:
     return context.bot_data["settings"]
 
@@ -177,7 +197,8 @@ def require(
                     await deny(update, "You're not an authorised user of this bot. Message me privately and send /start.")
                 return None
             if actor.status != UserStatus.ACTIVE:
-                await deny(update, "Your access has been revoked. Contact the Super Admin.")
+                if update.callback_query is not None or may_reply_to_unregistered(context, update.effective_user.id):
+                    await deny(update, "Your access has been revoked. Contact the Super Admin.")
                 return None
             if group and group_auth:
                 chat = update.effective_chat

@@ -154,8 +154,15 @@ class GoogleDriveClient:
                 f"for a service account check the key file. ({exc})"
             )
         if isinstance(exc, HttpError):
-            return DriveError(f"Google Drive error: {exc}")
-        return DriveError(f"Google Drive transport error: {exc!r}")
+            status = getattr(getattr(exc, "resp", None), "status", "?")
+            log.warning("Google API error %s: %s", status, exc)  # full detail (URL, message) stays in the log
+            hint = {403: "permission denied or quota exceeded", 404: "not found or not shared with the bot", 429: "rate limited"}.get(status, "")
+            # Only Google's fixed reason code is shown to users; its free-text message can embed file ids and URLs.
+            codes = [d.get("reason") for d in (getattr(exc, "error_details", None) or []) if isinstance(d, dict) and d.get("reason")]
+            code = f" [{codes[0][:40]}]" if codes and isinstance(codes[0], str) else ""
+            return DriveError(f"Google Drive error {status}" + (f" ({hint})" if hint else "") + code)
+        log.warning("Google transport error: %r", exc)
+        return DriveError("Google Drive is unreachable right now (network error); please try again later.")
 
     @staticmethod
     def _failure_types() -> tuple[type[BaseException], ...]:

@@ -12,7 +12,7 @@ from ...models import User
 from ...services import groups as group_service
 from ...services import users as user_service
 from ...util import esc, fmt_dt
-from ..access import clear_prompt, require, safe_edit, set_prompt, settings_of
+from ..access import clear_prompt, parse_enum, parse_int, require, safe_edit, set_prompt, settings_of
 from ..keyboards import (
     confirm_revoke_group_keyboard,
     groups_list_keyboard,
@@ -110,12 +110,16 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, act
             await safe_edit(update, _groups_text(groups), groups_list_keyboard(groups))
             return
         if parts[1] == "u":
-            user_id = int(parts[2])
+            user_id = parse_int(parts[2] if len(parts) > 2 else None)
             action = parts[3] if len(parts) > 3 else "show"
+            role = parse_enum(Role, parts[4] if len(parts) > 4 else None)
+            if user_id is None or (action == "role" and role is None):
+                await query.answer("Invalid request.", show_alert=True)
+                return
             toast = None
             try:
                 if action == "role":
-                    user = user_service.set_role(session, user_id, Role(parts[4]), settings.super_admin_telegram_id)
+                    user = user_service.set_role(session, user_id, role, settings.super_admin_telegram_id)
                     toast = f"Role set to {ROLE_LABELS[user.role]}"
                 elif action == "revoke":
                     user = user_service.revoke_user(session, user_id, settings.super_admin_telegram_id)
@@ -136,8 +140,11 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, act
             await safe_edit(update, _user_card(user, context), user_card_keyboard(user, settings.super_admin_telegram_id))
             return
         if parts[1] == "g":
-            chat_id = int(parts[2])
+            chat_id = parse_int(parts[2] if len(parts) > 2 else None)
             action = parts[3] if len(parts) > 3 else ""
+            if chat_id is None:
+                await query.answer("Invalid request.", show_alert=True)
+                return
             group = group_service.get_group(session, chat_id)
             if group is None:
                 await query.answer("Group not found", show_alert=True)

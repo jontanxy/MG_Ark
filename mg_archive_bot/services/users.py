@@ -7,7 +7,8 @@ from sqlalchemy.orm import Session
 
 from ..constants import CONTRIBUTOR_ROLES, ROLE_RANK, Role, UserStatus
 from ..models import LoginAttempt, Setting, User
-from ..security import hash_password, verify_password
+from ..models import Assignment
+from ..security import PLACEHOLDER_PASSWORDS, WeakPasswordError, hash_password, validate_new_password, verify_password
 from ..util import utcnow
 
 PASSWORD_KEY = "access_password_hash"
@@ -88,8 +89,19 @@ def set_role(session: Session, telegram_id: int, role: Role, super_admin_id: int
     if role == Role.SUPER_ADMIN:
         raise UserError("Only the configured Super Admin can hold that role.")
     user.role = role
+    if role not in CONTRIBUTOR_ROLES:
+        _drop_assignments(session, telegram_id)  # a view-only role is never responsible for uploads
     session.flush()
     return user
+
+
+def _drop_assignments(session: Session, telegram_id: int) -> int:
+    rows = session.scalars(select(Assignment).where(Assignment.user_id == telegram_id)).all()
+    for row in rows:
+        if row.project is not None and row in row.project.assignments:
+            row.project.assignments.remove(row)  # keep already-loaded objects consistent
+        session.delete(row)
+    return len(rows)
 
 
 def revoke_user(session: Session, telegram_id: int, super_admin_id: int) -> User:
@@ -99,6 +111,7 @@ def revoke_user(session: Session, telegram_id: int, super_admin_id: int) -> User
     if telegram_id == super_admin_id or user.role == Role.SUPER_ADMIN:
         raise UserError("The Super Admin cannot be revoked.")
     user.status = UserStatus.REVOKED
+    _drop_assignments(session, telegram_id)  # revocation ends every responsibility and every mention
     session.flush()
     return user
 
@@ -127,14 +140,26 @@ def seed_password_if_missing(session: Session, initial_password: str) -> bool:
         return False
     if not initial_password:
         raise UserError("No access password is set. Provide INITIAL_ACCESS_PASSWORD in .env for the first run.")
+    try:
+        validate_new_password(initial_password)
+    except WeakPasswordError as exc:
+        raise UserError(f"INITIAL_ACCESS_PASSWORD is not acceptable: {exc}") from exc
     session.merge(Setting(key=PASSWORD_KEY, value=hash_password(initial_password)))
     session.flush()
     return True
 
 
+def placeholder_password_in_use(session: Session) -> bool:
+    """True when the stored access password is one of the well-known placeholders (refuse to run)."""
+    stored = get_password_hash(session)
+    return any(verify_password(candidate, stored) for candidate in PLACEHOLDER_PASSWORDS)
+
+
 def set_access_password(session: Session, new_password: str) -> None:
-    if len(new_password) < 8:
-        raise UserError("Password must be at least 8 characters.")
+    try:
+        validate_new_password(new_password)
+    except WeakPasswordError as exc:
+        raise UserError(str(exc)) from exc
     session.merge(Setting(key=PASSWORD_KEY, value=hash_password(new_password)))
     session.flush()
 

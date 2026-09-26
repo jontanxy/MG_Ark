@@ -9,6 +9,7 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from ...constants import (
+    CATEGORY_FLAGS,
     CATEGORY_LABELS,
     METADATA_FIELDS,
     REVOCABLE_STATUSES,
@@ -28,10 +29,11 @@ from ...services import users as user_service
 from ...services.drive import DriveError
 from ...services.projects import ProjectError
 from ...services.validation import latest_report
-from ...util import esc
-from ..access import clear_prompt, drive_of, project_lock, require, safe_edit, set_prompt, settings_of
+from ...util import clip_message, esc
+from ..access import clear_prompt, drive_of, parse_enum, parse_int, project_lock, require, safe_edit, set_prompt, settings_of
 from ..actions import (
     check_project,
+    may_list_files,
     post_to_group,
     project_file_listing,
     rebuild_sheet,
@@ -91,7 +93,7 @@ def _menu_text(session: Session, project: Project, context: ContextTypes.DEFAULT
         text += f"\n<b>MG Group:</b> {esc(group.title if group else project.mg_group_chat_id)}{state}"
     else:
         text += "\n<b>MG Group:</b> none linked"
-    return text
+    return clip_message(text)
 
 
 async def _show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, session: Session, project: Project, prefix: str = "") -> None:
@@ -133,11 +135,12 @@ async def cmd_projects(update: Update, context: ContextTypes.DEFAULT_TYPE, actor
 @require(Role.TEAM_LEAD)
 async def cmd_project(update: Update, context: ContextTypes.DEFAULT_TYPE, actor: User) -> None:
     args = context.args or []
-    if not args or not args[0].isdigit():
+    project_id = parse_int(args[0]) if args else None
+    if project_id is None:
         await update.message.reply_text("Usage: /project &lt;id&gt; — or use /projects to pick one.")
         return
     with session_scope() as session:
-        project = _load_project(session, int(args[0]))
+        project = _load_project(session, project_id)
         if project is None:
             await update.message.reply_text("Project not found.")
             return
@@ -366,10 +369,11 @@ async def wizard_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, ac
             if arg == "none":
                 wizard["collection_id"] = None
             else:
-                if collection_service.get_collection(session, int(arg)) is None:
+                collection_id = parse_int(arg)
+                if collection_id is None or collection_service.get_collection(session, collection_id) is None:
                     await safe_edit(update, "That collection no longer exists. Send /newproject to start again.")
                     return
-                wizard["collection_id"] = int(arg)
+                wizard["collection_id"] = collection_id
             await _ask_project_name(update, context, session)
             return
         project = _load_draft(session, context, actor)
@@ -380,12 +384,18 @@ async def wizard_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, ac
             if arg == "done":
                 await _wizard_group_step(update, context, session, project)
             else:
-                project_service.toggle_declaration(session, project, AssetCategory(arg))
+                category = parse_enum(AssetCategory, arg)
+                if category is None or category not in CATEGORY_FLAGS:
+                    return  # malformed button data: ignore
+                project_service.toggle_declaration(session, project, category)
                 session.commit()
                 await query.edit_message_reply_markup(declaration_keyboard(project, "nw:decl"))
         elif step == "grp":
+            chat_id = None if arg == "none" else parse_int(arg)
+            if arg != "none" and chat_id is None:
+                return  # malformed button data: ignore
             try:
-                project_service.set_group(session, project, None if arg == "none" else int(arg))
+                project_service.set_group(session, project, chat_id)
             except ProjectError as exc:
                 await safe_edit(update, f"❌ {esc(str(exc))}")
                 return
@@ -401,7 +411,13 @@ async def wizard_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, ac
             if arg == "done":
                 await _wizard_summary(update, context, session, project)
             else:
-                project_service.toggle_assignment(session, project, int(arg), AssetCategory.ALL)
+                user_id = parse_int(arg)
+                if user_id is None:
+                    return  # malformed button data: ignore
+                try:
+                    project_service.toggle_assignment(session, project, user_id, AssetCategory.ALL)
+                except ProjectError:
+                    return
                 session.commit()
                 users = user_service.list_assignable_users(session)
                 selected = {a.user_id for a in project.assignments if a.category == AssetCategory.ALL}
@@ -480,7 +496,11 @@ async def _progress_view(update: Update, context: ContextTypes.DEFAULT_TYPE, ses
 async def project_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, actor: User) -> None:
     query = update.callback_query
     parts = query.data.split(":")
-    project_id, action, args = int(parts[1]), parts[2], parts[3:]
+    project_id = parse_int(parts[1] if len(parts) > 1 else None)
+    action, args = (parts[2] if len(parts) > 2 else ""), parts[3:]
+    if project_id is None:
+        await query.answer("Invalid request.", show_alert=True)
+        return
     settings = settings_of(context)
     with session_scope() as session:
         project = _load_project(session, project_id)
@@ -500,6 +520,9 @@ async def project_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, a
         elif action == "files":
             if project.status == ProjectStatus.CANCELLED:
                 await query.answer("This project's folder is in the Drive trash.", show_alert=True)
+                return
+            if not may_list_files(context, actor.telegram_id):
+                await query.answer("Please wait a minute before requesting another file listing.", show_alert=True)
                 return
             await query.answer("Reading Google Drive…")
             for chunk in await project_file_listing(context, project):
@@ -540,11 +563,19 @@ async def project_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, a
             await safe_edit(update, f"👥 <b>{esc(project.full_name)}</b> — assign designers\nPick what to assign for. “All assets” covers every folder.", assign_category_keyboard(project))
 
         elif action == "asgcat":
+            category = parse_enum(AssetCategory, args[0] if args else None)
+            if category is None:
+                await query.answer("Invalid request.", show_alert=True)
+                return
             await query.answer()
-            await _assign_users_view(update, session, project, AssetCategory(args[0]))
+            await _assign_users_view(update, session, project, category)
 
         elif action == "asg":
-            category, user_id = AssetCategory(args[0]), int(args[1])
+            category = parse_enum(AssetCategory, args[0] if args else None)
+            user_id = parse_int(args[1] if len(args) > 1 else None)
+            if category is None or user_id is None:
+                await query.answer("Invalid request.", show_alert=True)
+                return
             try:
                 now_on = project_service.toggle_assignment(session, project, user_id, category)
             except ProjectError as exc:
@@ -585,24 +616,31 @@ async def project_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, a
             )
 
         elif action == "dt":
-            if args[0] == "done":
+            arg = args[0] if args else ""
+            if arg == "done":
                 await query.answer()
                 await _show_menu(update, context, session, project)
                 return
-            project_service.toggle_declaration(session, project, AssetCategory(args[0]))
-            session.commit()
+            category = parse_enum(AssetCategory, arg)
+            if category is None or category not in CATEGORY_FLAGS:
+                await query.answer("Invalid request.", show_alert=True)
+                return
             created: list[str] = []
             toast, alert = "Saved", False
-            if project.drive_root_id:
-                try:
-                    created = await project_service.ensure_folders(session, project, drive_of(context), settings)
-                    session.commit()
-                    if created:
-                        toast = "Folder created on Drive"
-                except (ProjectError, DriveError) as exc:
-                    session.rollback()
-                    log.warning("ensure_folders failed: %s", exc)
-                    toast, alert = f"Saved, but Drive folder creation failed: {exc}"[:190], True
+            async with project_lock(context, project.id):  # a double tap must not create duplicate folders
+                session.refresh(project)
+                project_service.toggle_declaration(session, project, category)
+                session.commit()
+                if project.drive_root_id:
+                    try:
+                        created = await project_service.ensure_folders(session, project, drive_of(context), settings)
+                        session.commit()
+                        if created:
+                            toast = "Folder created on Drive"
+                    except (ProjectError, DriveError) as exc:
+                        session.rollback()
+                        log.warning("ensure_folders failed: %s", exc)
+                        toast, alert = f"Saved, but Drive folder creation failed: {exc}"[:190], True
             schedule_sheet_sync(context, project.id)
             await query.answer(toast, show_alert=alert)
             await query.edit_message_reply_markup(declaration_keyboard(project, f"pj:{project.id}:dt", done_text="◀️ Back to project"))
@@ -618,8 +656,13 @@ async def project_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, a
             await safe_edit(update, f"💬 Which MG Group should receive this project's announcements?\n{now}{GROUP_HINT}", group_choice_keyboard(groups, f"pj:{project.id}:grp"))
 
         elif action == "grp":
+            arg = args[0] if args else ""
+            chat_id = None if arg == "none" else parse_int(arg)
+            if arg != "none" and chat_id is None:
+                await query.answer("Invalid request.", show_alert=True)
+                return
             try:
-                project_service.set_group(session, project, None if args[0] == "none" else int(args[0]))
+                project_service.set_group(session, project, chat_id)
             except ProjectError as exc:
                 await query.answer(str(exc), show_alert=True)
                 return

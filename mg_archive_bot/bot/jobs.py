@@ -18,10 +18,24 @@ from ..services import projects as project_service
 from ..services.drive import file_link
 from ..services.previews import PreviewJob, kill_active_transcodes, process_preview, record_result
 from ..util import esc, human_size, utcnow
-from .access import drive_of, settings_of
+from .access import drive_of, limiter, settings_of
 from .actions import check_project, notify_user, post_to_group, rebuild_sheet, tree_of
 
 log = logging.getLogger(__name__)
+
+
+def _public_reason(error: str) -> str:
+    """A short, path- and API-free description of why a preview failed."""
+    low = (error or "").lower()
+    if "ffmpeg not found" in low:
+        return "ffmpeg is not installed on the bot's machine"
+    if "ffmpeg failed" in low or "ffmpeg" in low:
+        return "the file could not be converted (not a readable video?)"
+    if "disk" in low:
+        return "not enough disk space on the bot's machine"
+    if "download" in low or "unreachable" in low or "drive" in low:
+        return "the master could not be downloaded from Google Drive"
+    return "an unexpected error"
 
 
 class PreviewWorker:
@@ -88,14 +102,22 @@ class PreviewWorker:
             record_result(session, job.preview_id, result)
         target = job.requested_by
         if target is None and result.status == PreviewStatus.FAILED:
-            target = created_by  # unattended scan: the Team Lead who owns the project should know
+            # Unattended scan: the Team Lead who owns the project should know, but at most once per interval
+            # per project so a folder full of broken files cannot flood their DMs.
+            settings_ = settings_of(self._ctx())
+            if not limiter(self._ctx(), "preview_failure_dm", 1, settings_.preview_failure_dm_interval_minutes * 60).allow(job.project_id):
+                return
+            target = created_by
         if target is None:
             return
         if result.status == PreviewStatus.READY:
             link = f'<a href="{file_link(result.preview_drive_id)}">open on Drive</a>' if result.preview_drive_id else ""
-            text = f"✅ Preview ready: <b>{esc(project_name)}</b> — {esc(result.preview_name)} ({human_size(result.size_bytes)}) {link}"
+            text = f"✅ Preview ready: <b>{esc(project_name)}</b> — {esc(result.preview_name[:120])} ({human_size(result.size_bytes)}) {link}"
         else:
-            text = f"❌ Preview failed: <b>{esc(project_name)}</b> — {esc(job.source.name)}\n<code>{esc(result.error[:300])}</code>"
+            text = (
+                f"❌ Preview failed: <b>{esc(project_name)}</b> — {esc(job.source.name[:120])}\n"
+                f"<i>{esc(_public_reason(result.error))}</i> (details are in the bot log)"
+            )
         await notify_user(self._ctx(), target, text)
 
     def _ctx(self) -> SimpleNamespace:

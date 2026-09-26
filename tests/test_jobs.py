@@ -69,6 +69,7 @@ async def test_preview_worker_end_to_end(db, settings, drive, fake_ffmpeg):
     harness = BotHarness(settings, drive)
     worker = PreviewWorker(harness.bot, harness.bot_data)
     with session_scope() as s:
+        user_service.register_designer(s, 42, "Requester", None)  # only registered, active users are ever DM'd
         p = project_service.create_draft(s, "Preview Me", 1, "Lead", 2026)
         project_service.set_declaration(s, p, AssetCategory.CONTIN_VIDEOS, True)
         await project_service.provision_folders(s, p, drive, settings)

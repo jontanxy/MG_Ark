@@ -6,3 +6,14 @@ services:
     volumes:
       - ./data:/app/data
       - ./secrets:/app/secrets:ro
+    # Hardening: no capabilities, no privilege escalation, read-only image with a scratch /tmp,
+    # bounded processes and memory (ffmpeg decodes designer-supplied media).
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    tmpfs: ["/tmp"]
+    pids_limit: 256
+    deploy:
+      resources:
+        limits:
+          memory: 4g

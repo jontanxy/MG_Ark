@@ -32,7 +32,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if actor is not None:
         clear_prompt(context)
         if actor.status != UserStatus.ACTIVE:
-            await update.message.reply_text("🚫 Your access has been revoked. Contact the Super Admin.")
+            if may_reply_to_unregistered(context, update.effective_user.id):
+                await update.message.reply_text("🚫 Your access has been revoked. Contact the Super Admin.")
             return
         await update.message.reply_text(
             f"👋 Welcome back, <b>{esc(actor.display_name)}</b> ({ROLE_LABELS[actor.role]}).\n\n" + help_text(actor, private=True)
