@@ -34,6 +34,7 @@ from ..access import clear_prompt, drive_of, parse_enum, parse_int, project_lock
 from ..actions import (
     check_project,
     may_list_files,
+    notify_user,
     post_to_group,
     project_file_listing,
     rebuild_sheet,
@@ -52,6 +53,7 @@ from ..keyboards import (
     confirm_verify_keyboard,
     declaration_keyboard,
     group_choice_keyboard,
+    lead_choice_keyboard,
     metadata_field_keyboard,
     previews_keyboard,
     project_menu_keyboard,
@@ -83,6 +85,13 @@ def _tz(context: ContextTypes.DEFAULT_TYPE):
     return context.bot_data["tz"]
 
 
+MANAGE_ACTIONS = frozenset(
+    {"announce", "remind", "assign", "asgcat", "asg", "meta", "mf", "decl", "dt", "group", "grp", "prev",
+     "verify", "verify2", "revoke", "revoke2", "restore", "reopen", "lead", "setlead"}
+)
+NOT_LEAD = "Only this project's lead (or the Super Admin) can do that."
+
+
 def _menu_text(session: Session, project: Project, context: ContextTypes.DEFAULT_TYPE) -> str:
     report = latest_report(session, project)
     creator = user_by_id(session, project.created_by)
@@ -96,8 +105,11 @@ def _menu_text(session: Session, project: Project, context: ContextTypes.DEFAULT
     return clip_message(text)
 
 
-async def _show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, session: Session, project: Project, prefix: str = "") -> None:
-    await safe_edit(update, prefix + _menu_text(session, project, context), project_menu_keyboard(project))
+async def _show_menu(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, session: Session, project: Project, prefix: str = "", actor: User | None = None
+) -> None:
+    manage = actor is None or project_service.can_manage(actor, project)
+    await safe_edit(update, prefix + _menu_text(session, project, context), project_menu_keyboard(project, manage=manage))
 
 
 def _load_project(session: Session, project_id: int) -> Project | None:
@@ -144,7 +156,9 @@ async def cmd_project(update: Update, context: ContextTypes.DEFAULT_TYPE, actor:
         if project is None:
             await update.message.reply_text("Project not found.")
             return
-        await update.message.reply_text(_menu_text(session, project, context), reply_markup=project_menu_keyboard(project))
+        await update.message.reply_text(
+            _menu_text(session, project, context), reply_markup=project_menu_keyboard(project, manage=project_service.can_manage(actor, project))
+        )
 
 
 @require(Role.TEAM_LEAD)
@@ -250,6 +264,17 @@ async def _wizard_group_step(update: Update, context: ContextTypes.DEFAULT_TYPE,
     await safe_edit(update, text, group_choice_keyboard(groups, "nw:grp"))
 
 
+async def _wizard_lead_step(update: Update, context: ContextTypes.DEFAULT_TYPE, session: Session, project: Project) -> None:
+    leads = project_service.eligible_leads(session)
+    if not leads:
+        project_service.delete_draft(session, project)
+        session.commit()
+        context.user_data.pop("wizard", None)
+        await safe_edit(update, "👑 Every project needs a Team Lead as its lead, and nobody holds that role yet. Promote someone in /users, then run /newproject again.")
+        return
+    await safe_edit(update, "👑 Who is the <b>project lead</b>? They manage this project and receive its notifications.", lead_choice_keyboard(leads, "nw:lead"))
+
+
 async def _wizard_meta_step(update: Update, context: ContextTypes.DEFAULT_TYPE, project: Project, note: str = "") -> None:
     await safe_edit(
         update,
@@ -311,6 +336,7 @@ async def _wizard_summary(update: Update, context: ContextTypes.DEFAULT_TYPE, se
     lines = [
         note + f"📋 <b>Ready to create: {esc(project.full_name)}</b>",
         "",
+        f"<b>Lead:</b> {esc(project.lead.display_name) if project.lead is not None else '—'}",
         f"<b>Declared assets:</b> {esc(', '.join(declared) if declared else 'Working files only')}",
         f"<b>MG Group:</b> {esc(group.title) if group else 'none — nothing will be announced'}",
         f"<b>Assigned:</b> {esc(', '.join(u.display_name for u in who) if who else 'nobody yet')}",
@@ -382,7 +408,10 @@ async def wizard_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, ac
             return
         if step == "decl":
             if arg == "done":
-                await _wizard_group_step(update, context, session, project)
+                if project.lead_id is None:  # the Super Admin created it: a Team Lead must be chosen
+                    await _wizard_lead_step(update, context, session, project)
+                else:
+                    await _wizard_group_step(update, context, session, project)
             else:
                 category = parse_enum(AssetCategory, arg)
                 if category is None or category not in CATEGORY_FLAGS:
@@ -390,6 +419,17 @@ async def wizard_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, ac
                 project_service.toggle_declaration(session, project, category)
                 session.commit()
                 await query.edit_message_reply_markup(declaration_keyboard(project, "nw:decl"))
+        elif step == "lead":
+            lead_id = parse_int(arg)
+            if lead_id is None:
+                return
+            try:
+                project_service.set_lead(session, project, lead_id)
+            except ProjectError as exc:
+                await safe_edit(update, f"❌ {esc(str(exc))}")
+                return
+            session.commit()
+            await _wizard_group_step(update, context, session, project)
         elif step == "grp":
             chat_id = None if arg == "none" else parse_int(arg)
             if arg != "none" and chat_id is None:
@@ -458,6 +498,10 @@ async def handle_meta_value(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             clear_prompt(context)
             await update.message.reply_text("That project is no longer available.")
             return
+        if not project_service.can_manage(actor, project):
+            clear_prompt(context)
+            await update.message.reply_text(NOT_LEAD)
+            return
         try:
             stored = project_service.set_metadata_field(session, project, field, update.message.text or "")
         except ProjectError as exc:
@@ -508,14 +552,44 @@ async def project_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, a
             await query.answer()
             await safe_edit(update, "Project not found.")
             return
+        if action in MANAGE_ACTIONS and not project_service.can_manage(actor, project):
+            await query.answer(NOT_LEAD, show_alert=True)
+            return
 
         if action == "menu":
             await query.answer()
-            await _show_menu(update, context, session, project)
+            await _show_menu(update, context, session, project, actor=actor)
 
         elif action == "details":
             await query.answer()
-            await _show_menu(update, context, session, project)
+            await _show_menu(update, context, session, project, actor=actor)
+
+        elif action == "lead":
+            await query.answer()
+            leads = project_service.eligible_leads(session)
+            current = esc(project.lead.display_name) if project.lead is not None else "none"
+            await safe_edit(
+                update,
+                f"👑 <b>{esc(project.full_name)}</b> — project lead\nCurrent: <b>{current}</b>\n\nThe lead manages the project and receives its notifications. Only Team Leads can be chosen.",
+                lead_choice_keyboard(leads, f"pj:{project.id}:setlead", back_data=f"pj:{project.id}:menu"),
+            )
+
+        elif action == "setlead":
+            lead_id = parse_int(args[0] if args else None)
+            if lead_id is None:
+                await query.answer("Invalid request.", show_alert=True)
+                return
+            try:
+                lead = project_service.set_lead(session, project, lead_id)
+            except ProjectError as exc:
+                await query.answer(str(exc), show_alert=True)
+                return
+            session.commit()
+            schedule_sheet_sync(context, project.id)
+            await query.answer(f"Lead: {lead.display_name}")
+            if lead.telegram_id != actor.telegram_id:
+                await notify_user(context, lead.telegram_id, f"👑 You are now the lead of <b>{esc(project.full_name)}</b>. Open /projects to manage it.")
+            await _show_menu(update, context, session, project, actor=actor)
 
         elif action == "files":
             if project.status == ProjectStatus.CANCELLED:

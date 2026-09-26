@@ -18,6 +18,7 @@ from ..constants import (
     AssetCategory,
     FolderSpec,
     ProjectStatus,
+    Role,
     build_folder_tree,
 )
 from ..models import Assignment, Collection, Project, ProjectFolder, Tag, User
@@ -101,6 +102,7 @@ def create_draft(
         raise ProjectError(f"A project named “{cleaned}” already exists{where}.")
     for draft in stale_drafts(session, created_by):
         session.delete(draft)
+    creator_user = session.get(User, created_by)
     project = Project(
         name=cleaned,
         status=ProjectStatus.DRAFT,
@@ -109,10 +111,58 @@ def create_draft(
         year=year,
         collection_id=collection.id if collection else None,
         collection=collection.name if collection else "",
+        # A Team Lead leads what they create; the Super Admin must pick a lead in the wizard.
+        lead_id=created_by if creator_user is not None and creator_user.role == Role.TEAM_LEAD else None,
     )
     session.add(project)
     session.flush()
     return project
+
+
+def can_manage(user: User, project: Project) -> bool:
+    """Only the project's lead and the Super Admin may change a project; other Team Leads only view it."""
+    return user.role == Role.SUPER_ADMIN or (project.lead_id is not None and user.telegram_id == project.lead_id)
+
+
+def eligible_leads(session: Session) -> list[User]:
+    """Active users holding the Team Lead role — the only people who can lead a project."""
+    return [u for u in session.scalars(select(User)).all() if u.role == Role.TEAM_LEAD and u.is_active]
+
+
+def set_lead(session: Session, project: Project, user_id: int) -> User:
+    user = session.get(User, user_id)
+    if user is None or not user.is_active:
+        raise ProjectError("That user is not an active member.")
+    if user.role != Role.TEAM_LEAD:
+        raise ProjectError("The project lead must hold the Team Lead role (the Super Admin cannot lead a project).")
+    project.lead_id = user.telegram_id
+    project.lead = user
+    session.flush()
+    return user
+
+
+def release_led_projects(session: Session, user_id: int) -> list[Project]:
+    """When someone stops being an active Team Lead, their projects lose their lead until reassigned."""
+    projects = list(session.scalars(select(Project).where(Project.lead_id == user_id)).all())
+    for project in projects:
+        project.lead_id = None
+        project.lead = None
+    session.flush()
+    return projects
+
+
+def backfill_leads(session: Session) -> tuple[int, list[str]]:
+    """Legacy rows: adopt the creator as lead when they are a Team Lead. Returns (adopted, names still without a lead)."""
+    adopted, missing = 0, []
+    for project in session.scalars(select(Project).where(Project.lead_id.is_(None), Project.status != ProjectStatus.DRAFT)):
+        creator = session.get(User, project.created_by)
+        if creator is not None and creator.role == Role.TEAM_LEAD and creator.is_active:
+            project.lead_id = creator.telegram_id
+            adopted += 1
+        else:
+            missing.append(project.full_name)
+    session.flush()
+    return adopted, missing
 
 
 def delete_draft(session: Session, project: Project) -> None:

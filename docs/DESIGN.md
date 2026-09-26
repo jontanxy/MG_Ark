@@ -62,7 +62,7 @@ tests/
 * **settings**: key/value — `access_password_hash` (scrypt, salted).
 * **mg_groups**: `chat_id` PK (re-keyed in place on basic-group → supergroup migration), `title`, `status` (ACTIVE|REVOKED), `created_by`, `authorised_at`, `revoked_by` (Super Admin id for a deliberate revoke; NULL when the bot was simply removed from the chat).
 * **provisioning_tokens**: `token` unique (`MG-XXXX-XXXX`), `created_by`, `expires_at` (24 h), `used_at`, `used_chat_id`.
-* **projects**: `id`, `name`, `status`, declarations `has_timeline`, `has_contin_videos`, `has_contin_lyrics`, `has_psd`, metadata (`collection`, `description`, `event`, `ministry`, `style`, `colours`, `year`, `creator`, `asset_types`), `created_by`, `mg_group_chat_id` (nullable), `drive_root_id`, `drive_link`, `last_validated_at`, `last_complete` (bool), `last_reminder_at`, `verified_by`, `verified_at`, timestamps.
+* **projects**: `id`, `name`, `status`, `lead_id` (the one Team Lead responsible; NULL only for legacy rows or after the lead lost the role — management then falls to the Super Admin until reassigned), declarations `has_timeline`, `has_contin_videos`, `has_contin_lyrics`, `has_psd`, metadata (`collection`, `description`, `event`, `ministry`, `style`, `colours`, `year`, `creator`, `asset_types`), `created_by`, `mg_group_chat_id` (nullable), `drive_root_id`, `drive_link`, `last_validated_at`, `last_complete` (bool), `last_reminder_at`, `verified_by`, `verified_at`, timestamps.
 * **collections**: `id`, `name` (unique, case-insensitive), `drive_id`/`link` (folder under the root, created lazily when the first sub-project is provisioned; an existing same-named folder is re-used), `created_by`. `projects.collection_id` → sub-projects live in `<root>/<Collection>/<Project>/…`; their `collection` metadata mirrors the folder name and is not editable separately. Project names are unique within a collection (or within the top level). Display name is `Collection / Project`.
 * **tags** + **project_tags**: normalised lowercase tag names.
 * **project_folders**: `project_id`, `key` (e.g. `timeline_prores`), `name`, `drive_id`, `link`.
@@ -154,7 +154,7 @@ Each result:
 |---|---|---|---|
 | /search, preview, open archive | ✔ | ✔ | ✔ |
 | **Lights** (extra role): search + Preview only — no Open Archive / Details / Files (buttons hidden and callbacks refused), no group `/files`, never assignable | — | — | preview-only |
-| /newproject, /projects, project menu (validate, announce, remind, assign, metadata, previews, verify, reopen) | ✔ | ✔ | ✖ |
+| /newproject, /projects, project menu (validate, announce, remind, assign, metadata, previews, verify, reopen) | ✔ | ✔ (mutating actions only on projects they lead; read-only elsewhere) | ✖ |
 | /creategroup (provisioning token) | ✔ | ✔ | ✖ |
 | /setpassword, /users, /groups, revoke/restore user, set role, revoke group | ✔ | ✖ | ✖ |
 

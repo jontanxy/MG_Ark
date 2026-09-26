@@ -13,6 +13,7 @@ from telegram.error import InvalidToken
 from .bot.app import ALLOWED_UPDATES, build_application
 from .config import Settings
 from .db import init_db, session_scope
+from .services import projects as project_service
 from .services import users as user_service
 from .services.drive import DriveError, build_drive_client
 from .services.sheets import build_sheets_client
@@ -128,6 +129,11 @@ def main() -> int:
             return 2
         for demoted in user_service.reconcile_super_admin(session, settings.super_admin_telegram_id):
             log.warning("User %s held SUPER_ADMIN but is not SUPER_ADMIN_TELEGRAM_ID; demoted to Team Lead", demoted)
+        adopted, missing = project_service.backfill_leads(session)
+        if adopted:
+            log.info("Adopted the creator as lead for %d project(s)", adopted)
+        if missing:
+            log.warning("Projects without a lead (set one via /projects → Project lead): %s", ", ".join(missing[:10]))
         if user_service.placeholder_password_in_use(session):
             log.error(
                 "The stored access password is a well-known placeholder. Set a real INITIAL_ACCESS_PASSWORD in .env and run "

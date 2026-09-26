@@ -22,7 +22,7 @@ SHEET_ID_KEY = "tracking_sheet_id"
 SHEET_URL_KEY = "tracking_sheet_url"
 
 HEADERS = [
-    "ID", "Collection", "Project", "Status", "Year", "Event", "Ministry", "Style", "Colours", "Tags", "Asset types",
+    "ID", "Collection", "Project", "Status", "Lead", "Year", "Event", "Ministry", "Style", "Colours", "Tags", "Asset types",
     "Timeline", "Contin Videos", "Contin Lyrics", "PSD", "Assigned", "Created by", "Created", "Archived", "Verified by",
     "MG Group", "Previews", "Last checked", "Drive link", "Description",
 ]
@@ -48,6 +48,7 @@ def build_row(session: Session, project: Project, tz: tzinfo) -> list[str]:
         project.collection_folder.name if project.collection_folder else (project.collection or ""),
         project.name,
         status,
+        _user_name(session, project.lead_id),
         str(project.year or ""),
         project.event or "",
         project.ministry or "",
@@ -136,22 +137,29 @@ def _range(cells: str) -> str:
     return f"'{SHEET_TITLE}'!{cells}"
 
 
-def _ensure_header(sheets: SheetsClient, spreadsheet_id: str) -> None:
+def _ensure_header(sheets: SheetsClient, spreadsheet_id: str) -> bool:
+    """Make sure the header row matches HEADERS. Returns True when it had to be (re)written."""
     titles = sheets.sheet_ids(spreadsheet_id)
     if SHEET_TITLE not in titles:
         first_title, first_id = next(iter(titles.items()), ("Sheet1", 0))
         sheets.batch_update(spreadsheet_id, _format_requests(first_id))
         if not sheets.get_values(spreadsheet_id, _range("A1:A1")):
             sheets.update_values(spreadsheet_id, _range(f"A1:{LAST_COL}1"), [HEADERS])
-        return
-    first = sheets.get_values(spreadsheet_id, _range("A1:A1"))
-    if not first or not first[0] or first[0][0] != HEADERS[0]:
+        return False
+    header = sheets.get_values(spreadsheet_id, _range(f"A1:{LAST_COL}1"))
+    if not header or header[0] != HEADERS:  # first use, or the column layout changed with a new version
         sheets.update_values(spreadsheet_id, _range(f"A1:{LAST_COL}1"), [HEADERS])
+        return True
+    return False
 
 
 def upsert_row(sheets: SheetsClient, spreadsheet_id: str, row: list[str]) -> str:
-    """Blocking. Update the row whose ID (column A) matches, else append. Returns 'updated' | 'appended'."""
-    _ensure_header(sheets, spreadsheet_id)
+    """Blocking. Update the row whose ID (column A) matches, else append.
+
+    Returns 'updated' | 'appended', or 'needs_rebuild' when the column layout changed (rows must be rewritten).
+    """
+    if _ensure_header(sheets, spreadsheet_id):
+        return "needs_rebuild"
     ids = sheets.get_values(spreadsheet_id, _range("A:A"))
     for index, cells in enumerate(ids, start=1):
         if index == 1:

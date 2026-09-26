@@ -65,14 +65,25 @@ def confirm_keyboard(confirm_data: str, cancel_data: str, confirm_text: str = "C
     return InlineKeyboardMarkup([[_btn(confirm_text, confirm_data), _btn(cancel_text, cancel_data)]])
 
 
-def project_menu_keyboard(project: Project) -> InlineKeyboardMarkup:
+def project_menu_keyboard(project: Project, *, manage: bool = True) -> InlineKeyboardMarkup:
+    """Full menu for the project's lead and the Super Admin; a read-only menu for other Team Leads."""
     pid = project.id
+    if not manage:
+        rows = [
+            [_btn("🔎 Check progress", f"pj:{pid}:check"), _btn("📂 Files", f"pj:{pid}:files"), _btn("ℹ️ Details", f"pj:{pid}:details")],
+            [_btn("▶️ Previews", f"pj:{pid}:previews")],
+        ]
+        if project.drive_link:
+            rows.append([InlineKeyboardButton("📁 Open in Google Drive", url=project.drive_link)])
+        rows.append([_btn("◀️ Projects", "pl:0:open")])
+        return InlineKeyboardMarkup(rows)
     rows: list[list[InlineKeyboardButton]] = [
         [_btn("🔎 Check progress", f"pj:{pid}:check"), _btn("📂 Files", f"pj:{pid}:files"), _btn("ℹ️ Details", f"pj:{pid}:details")],
         [_btn("📣 Announce", f"pj:{pid}:announce"), _btn("⏰ Remind", f"pj:{pid}:remind")],
         [_btn("👥 Assign designers", f"pj:{pid}:assign"), _btn("🏷 Edit metadata", f"pj:{pid}:meta")],
         [_btn("⚙️ Declared assets", f"pj:{pid}:decl"), _btn("💬 MG group", f"pj:{pid}:group")],
         [_btn("🎞 Generate previews", f"pj:{pid}:prev"), _btn("▶️ Previews", f"pj:{pid}:previews")],
+        [_btn("👑 Project lead", f"pj:{pid}:lead")],
     ]
     if project.status == ProjectStatus.CANCELLED:
         rows = [
@@ -89,6 +100,13 @@ def project_menu_keyboard(project: Project) -> InlineKeyboardMarkup:
     if project.drive_link:
         rows.append([InlineKeyboardButton("📁 Open in Google Drive", url=project.drive_link)])
     rows.append([_btn("◀️ Projects", "pl:0:open")])
+    return InlineKeyboardMarkup(rows)
+
+
+def lead_choice_keyboard(leads: Iterable[User], prefix: str, back_data: str | None = None) -> InlineKeyboardMarkup:
+    rows = [[_btn(f"👑 {u.display_name}", f"{prefix}:{u.telegram_id}")] for u in list(leads)[:MAX_USER_BUTTONS]]
+    if back_data:
+        rows.append([_btn("◀️ Back", back_data)])
     return InlineKeyboardMarkup(rows)
 
 

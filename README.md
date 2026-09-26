@@ -167,6 +167,12 @@ python -m mg_archive_bot.tools.reset_password
 * **Collections** group sub-projects in one folder: `BF/Opening/…`, `BF/Worship/…`. Each sub-project keeps its own
   declarations, tracking, previews and verification; its Collection metadata is set automatically, so `/search bf`
   finds all of them. A collection folder that already exists under the root is re-used.
+* **Project lead**: every project has exactly one lead, who must hold the Team Lead role (never the Super Admin). A
+  Team Lead who creates a project is its lead; when the Super Admin creates one, the wizard asks who leads it. Only the
+  lead and the Super Admin can change a project (assign, metadata, group, previews, verify, revoke…); other Team Leads
+  see a read-only menu. The lead receives the project's notifications, is named in the announcement and the index
+  sheet, and can be changed via **👑 Project lead**. Revoking or demoting a lead frees their projects until a new lead
+  is set (the Super Admin is told which ones).
 * `/projects` → project menu: **Check progress**, **Announce**, **Remind**, **Assign designers** (per folder group),
   **Files** (folder-by-folder listing with names and sizes), **Edit metadata**, **Declared assets**, **MG group**,
   **Generate previews**, **Previews**, **Verify & archive**, **Reopen**, **Revoke project**, **Open in Google Drive**.
