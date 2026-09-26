@@ -485,7 +485,7 @@ async def test_search_results_and_preview_links(harness, authorised_group, drive
     texts = bot.texts(DESIGNER.id)
     assert "1 result" in texts[-2] and "🎬 <b>Easter Opening 2026</b>" in texts[-1] and "2 previews available" in texts[-1]
     buttons = harness.buttons(bot.last_markup(DESIGNER.id))
-    assert [t for t, _ in buttons] == ["▶️ Preview", "📁 Open Archive", "ℹ️ Details"]
+    assert [t for t, _ in buttons] == ["▶️ Preview", "📁 Open Archive", "ℹ️ Details", "📂 Files"]
     assert buttons[1][1].startswith("https://drive.google.com/drive/folders/")
     await harness.command(DESIGNER, "/search worship, nothing")
     assert "No projects match" in bot.last(DESIGNER.id)["text"]
@@ -1042,3 +1042,46 @@ async def test_live_status_message_is_edited_in_place(harness, authorised_group,
     await harness.press(LEAD, f"pj:{pid}:group")
     await harness.press(LEAD, f"pj:{pid}:grp:{other.id}")
     assert live_id() is None
+
+
+@pytest.mark.asyncio
+async def test_file_listing_from_menu_search_and_group(harness, authorised_group, drive):
+    bot = harness.bot
+    await run_wizard(harness, with_meta=True)
+    with session_scope() as s:
+        p = project_service.list_projects(s)[0]
+        pid, folders = p.id, {f.key: f.drive_id for f in p.folders}
+    drive.put_file(folders["fonts"], "Gotham.otf", size=1_000)
+    # Team Lead: project menu button
+    q = await harness.press(LEAD, f"pj:{pid}:menu")
+    assert ("📂 Files", f"pj:{pid}:files") in harness.buttons(q.edits[-1]["reply_markup"])
+    q = await harness.press(LEAD, f"pj:{pid}:files")
+    assert q.answers[-1][0] == "Reading Google Drive…"
+    listing = bot.last(LEAD.id)["text"]
+    assert listing.startswith("📂 <b>Easter Opening 2026</b> — 1 file · 1000 B") and "Gotham.otf · 1000 B" in listing
+    # Designer: from a search card
+    await harness.command(DESIGNER, "/search worship")
+    assert ("📂 Files", f"sr:{pid}:files") in harness.buttons(bot.last_markup(DESIGNER.id))
+    await harness.press(DESIGNER, f"sr:{pid}:files")
+    assert "Gotham.otf" in bot.last(DESIGNER.id)["text"]
+    # Drive is re-read at most once per cooldown window
+    drive.put_file(folders["ae"], "opening.aep", size=2_000)
+    await harness.press(DESIGNER, f"sr:{pid}:files")
+    assert "opening.aep" not in bot.last(DESIGNER.id)["text"]
+    harness.bot_data.pop("file_listings", None)
+    await harness.press(DESIGNER, f"sr:{pid}:files")
+    assert "opening.aep" in bot.last(DESIGNER.id)["text"]
+    # group /files: any authorised member, authorised group only
+    await harness.command(DESIGNER, "/files", chat=GROUP)
+    assert "opening.aep" in bot.last(GROUP.id)["text"] and "Open project folder" in bot.last(GROUP.id)["text"]
+    await harness.command(STRANGER, "/files", chat=GROUP)
+    assert "not an authorised user" in bot.last(GROUP.id)["text"]
+    await harness.command(DESIGNER, "/files")
+    assert "only works inside an MG Group" in bot.last(DESIGNER.id)["text"]
+    # a revoked project's folder is in the trash: no listing offered
+    await harness.press(LEAD, f"pj:{pid}:revoke")
+    await harness.press(LEAD, f"pj:{pid}:revoke2")
+    q = await harness.press(LEAD, f"pj:{pid}:files")
+    assert q.answers[-1] == ("This project's folder is in the Drive trash.", True)
+    await harness.command(DESIGNER, "/files", chat=GROUP)
+    assert "No open archives" in bot.last(GROUP.id)["text"]

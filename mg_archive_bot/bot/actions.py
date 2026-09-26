@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import time
 from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
@@ -17,6 +18,7 @@ from ..models import PreviewAsset, Project, User
 from ..services import groups as group_service
 from ..services import notifications
 from ..services import tracking
+from ..services.listing import build_listing, render_listing
 from ..services.previews import PreviewJob, PreviewOrphan, plan_previews, remove_orphans
 from ..services.sheets import spreadsheet_url
 from ..services.validation import ScanResult, latest_report, validate_project
@@ -230,6 +232,25 @@ async def send_preview(context: ContextTypes.DEFAULT_TYPE, chat_id: int, preview
 
 def user_by_id(session: Session, user_id: int | None) -> User | None:
     return session.get(User, user_id) if user_id is not None else None
+
+
+async def project_file_listing(context: ContextTypes.DEFAULT_TYPE, project: Project) -> list[str]:
+    """Telegram-ready listing of the project's Drive folder; re-read from Drive at most once per cooldown window."""
+    settings = settings_of(context)
+    cache: dict[int, tuple[float, list[str]]] = context.bot_data.setdefault("file_listings", {})
+    hit = cache.get(project.id)
+    if hit and time.monotonic() - hit[0] < settings.status_cooldown_seconds:
+        return hit[1]
+    if not project.drive_root_id:
+        return [f"📂 <b>{esc(project.full_name)}</b> has no Google Drive folder."]
+    key_order = {spec.key: i for i, spec in enumerate(tree_of(context))}
+    known = {f.drive_id: f.key for f in project.folders}
+    root = await asyncio.to_thread(build_listing, drive_of(context), project.drive_root_id, project.name, known, key_order)
+    if root.error:
+        return [f"⚠️ Could not read Google Drive for <b>{esc(project.full_name)}</b>: {esc(root.error[:300])}"]
+    chunks = render_listing(project.full_name, root)
+    cache[project.id] = (time.monotonic(), chunks)
+    return chunks
 
 
 # ----------------------------------------------------------------------------------------

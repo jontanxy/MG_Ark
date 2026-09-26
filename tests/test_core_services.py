@@ -335,6 +335,75 @@ async def test_tracking_sheet_service(db, settings, drive):
         assert [r[2] for r in sheets.get_values(sheet_id, "'Projects'!A:Y")[1:]] == ["Opening"]
 
 
+@pytest.mark.asyncio
+async def test_file_listing_tree_and_rendering(db, settings, drive):
+    from mg_archive_bot.services.drive import DriveError
+    from mg_archive_bot.services.listing import build_listing, render_listing
+
+    with session_scope() as s:
+        p = project_service.create_draft(s, "Listing", 1, "Lead", 2026)
+        project_service.set_declaration(s, p, AssetCategory.TIMELINE, True)
+        await project_service.provision_folders(s, p, drive, settings)
+        f = {x.key: x.drive_id for x in p.folders}
+        known = {x.drive_id: x.key for x in p.folders}
+        root_id, name = p.drive_root_id, p.name
+    order = {spec.key: i for i, spec in enumerate(build_folder_tree(settings.folder_names()))}
+    drive.put_file(f["fonts"], "Gotham-Book.otf", size=118_000)
+    drive.put_file(f["fonts"], "Gotham-Bold.otf", size=120_000)
+    drive.put_file(f["fonts"], ".DS_Store", size=6_000)  # junk is hidden
+    sub = drive.create_folder("Assets", f["ae"])
+    drive.put_file(sub.id, "logo <v2>.png", size=5_000)
+    drive.put_file(f["ae"], "opening.aep", size=2_000_000)
+    drive.put_file(f["timeline_prores"], "Loop.mov", size=8_400_000_000)
+    root = build_listing(drive, root_id, name, known, order)
+    assert [x.name for x in root.folders] == ["Working File", "Final Render", "_Previews"]  # archive order, not alphabetical
+    working = root.folders[0]
+    assert [x.name for x in working.folders] == ["Fonts", "AE"] and working.total_files == 4
+    assert [x.name for x in working.folders[0].files] == ["Gotham-Bold.otf", "Gotham-Book.otf"]  # files alphabetical
+    assert root.total_files == 5 and root.total_size == 118_000 + 120_000 + 5_000 + 2_000_000 + 8_400_000_000
+    chunks = render_listing("Listing", root)
+    assert len(chunks) == 1
+    text = chunks[0]
+    assert text.startswith("📂 <b>Listing</b> — 5 files · 7.8 GB\n<a href=\"https://drive.google.com/drive/folders/")
+    assert "logo &lt;v2&gt;.png · 4.9 KB" in text and ".DS_Store" not in text and "Loop.mov · 7.8 GB" in text
+    assert "Hap/Hap Alpha</a> — empty" in text and "Fonts</a> (2)" in text and "AE</a> (2)" in text
+    assert text.index("Working File") < text.index("Final Render") < text.index("_Previews")
+    assert "<b><a href=" in text  # top-level folders are bold links
+    # an unreadable folder is reported instead of aborting the whole listing
+    original = drive.list_children
+
+    def flaky(folder_id):
+        if folder_id == f["timeline"]:
+            raise DriveError("boom")
+        return original(folder_id)
+
+    drive.list_children = flaky  # type: ignore[method-assign]
+    text = render_listing("Listing", build_listing(drive, root_id, name, known, order))[0]
+    assert "Timeline</a> — ⚠️ could not read" in text and "Loop.mov" not in text and "Gotham-Bold.otf" in text
+    drive.list_children = original  # type: ignore[method-assign]
+    # deep trees stop at the depth limit
+    deep = f["ae"]
+    for i in range(8):
+        deep = drive.create_folder(f"level{i}", deep).id
+    drive.put_file(deep, "buried.txt", size=1)
+    text = render_listing("Listing", build_listing(drive, root_id, name, known, order))[0]
+    assert "level3" in text and "buried.txt" not in text and "deeper folders not shown" in text
+    # long listings are split into numbered messages
+    for i in range(400):
+        drive.put_file(f["lyrics_png"], f"lyric_{i:03d}.png", size=1_000)
+    chunks = render_listing("Listing", build_listing(drive, root_id, name, known, order))
+    assert len(chunks) > 1 and all(len(c) <= 3600 for c in chunks)
+    assert chunks[0].endswith(f"<i>(1/{len(chunks)})</i>") and chunks[-1].endswith(f"<i>({len(chunks)}/{len(chunks)})</i>")
+    assert "Open project folder" in chunks[0] and "Open project folder" not in chunks[1]
+    # an empty project
+    with session_scope() as s:
+        q = project_service.create_draft(s, "Empty", 1, "Lead", 2026)
+        await project_service.provision_folders(s, q, drive, settings)
+        empty = build_listing(drive, q.drive_root_id, q.name, {x.drive_id: x.key for x in q.folders}, order)
+    text = render_listing("Empty", empty)[0]
+    assert text.startswith("📂 <b>Empty</b> — no files yet") and text.count("— empty") == 13  # every folder of a fresh tree
+
+
 def test_memory_database_rejected():
     from mg_archive_bot.db import make_engine
 

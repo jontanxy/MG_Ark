@@ -30,7 +30,17 @@ from ...services.projects import ProjectError
 from ...services.validation import latest_report
 from ...util import esc
 from ..access import clear_prompt, drive_of, project_lock, require, safe_edit, set_prompt, settings_of
-from ..actions import check_project, post_to_group, rebuild_sheet, refresh_live_status_from_latest, schedule_sheet_sync, sheet_location, tree_of, user_by_id
+from ..actions import (
+    check_project,
+    post_to_group,
+    project_file_listing,
+    rebuild_sheet,
+    refresh_live_status_from_latest,
+    schedule_sheet_sync,
+    sheet_location,
+    tree_of,
+    user_by_id,
+)
 from ..keyboards import (
     assign_category_keyboard,
     collection_choice_keyboard,
@@ -486,6 +496,14 @@ async def project_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, a
         elif action == "details":
             await query.answer()
             await _show_menu(update, context, session, project)
+
+        elif action == "files":
+            if project.status == ProjectStatus.CANCELLED:
+                await query.answer("This project's folder is in the Drive trash.", show_alert=True)
+                return
+            await query.answer("Reading Google Drive…")
+            for chunk in await project_file_listing(context, project):
+                await context.bot.send_message(update.effective_chat.id, chunk)
 
         elif action == "check":
             await query.answer("Checking Google Drive…")

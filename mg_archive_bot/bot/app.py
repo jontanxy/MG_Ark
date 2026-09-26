@@ -44,6 +44,7 @@ ADMIN_COMMANDS = PRIVATE_COMMANDS + [
 ]
 GROUP_COMMANDS = [
     BotCommand("status", "Archive progress for this group"),
+    BotCommand("files", "List the files uploaded for this group's archives"),
     BotCommand("remind", "Post reminders for missing uploads (Team Lead)"),
     BotCommand("activate", "Authorise this group with a token (Team Lead)"),
     BotCommand("help", "Show group commands"),
@@ -114,6 +115,7 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("groups", admin.cmd_groups))
     app.add_handler(CommandHandler("setpassword", admin.cmd_setpassword))
     app.add_handler(CommandHandler("status", group_mode.cmd_status))
+    app.add_handler(CommandHandler("files", group_mode.cmd_files))
     app.add_handler(CommandHandler("remind", group_mode.cmd_remind))
     app.add_handler(CommandHandler("activate", mg_groups.cmd_activate))
 

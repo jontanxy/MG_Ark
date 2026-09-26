@@ -143,8 +143,8 @@ On first start the access password is seeded from `INITIAL_ACCESS_PASSWORD`; aft
   declarations, tracking, previews and verification; its Collection metadata is set automatically, so `/search bf`
   finds all of them. A collection folder that already exists under the root is re-used.
 * `/projects` → project menu: **Check progress**, **Announce**, **Remind**, **Assign designers** (per folder group),
-  **Edit metadata**, **Declared assets**, **MG group**, **Generate previews**, **Previews**, **Verify & archive**,
-  **Reopen**, **Revoke project**, **Open in Google Drive**.
+  **Files** (folder-by-folder listing with names and sizes), **Edit metadata**, **Declared assets**, **MG group**,
+  **Generate previews**, **Previews**, **Verify & archive**, **Reopen**, **Revoke project**, **Open in Google Drive**.
 * **Revoke project** (for a project that will not go ahead): after a confirmation, its Drive folder is moved to the
   trash, tracking and reminders stop, it disappears from search, its row is removed from the index sheet (rows below
   move up) and the MG Group is told. A Drive manager can recover the folder from the trash for 30 days, and
@@ -164,11 +164,13 @@ On first start the access password is seeded from `INITIAL_ACCESS_PASSWORD`; aft
 
 **Everyone (private chat)**
 
-* `/search worship, gold` or simply type keywords. Each result has **Preview**, **Open Archive**, **Details**.
+* `/search worship, gold` or simply type keywords. Each result has **Preview**, **Open Archive**, **Details** and
+  **Files** — a folder-by-folder list of what has been uploaded (file names and sizes, folders linked to Drive).
 
 **MG Group**
 
 * `/status` — progress of this group's open archives (fresh Drive check).
+* `/files` — folder-by-folder file listing for this group's open archives.
 * `/remind` — Team Lead only; posts reminders for missing uploads.
 * Everything else (search, previews, project and user management) is refused in groups to keep the chat clean.
 

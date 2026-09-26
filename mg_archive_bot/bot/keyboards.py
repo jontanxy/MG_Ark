@@ -68,7 +68,7 @@ def confirm_keyboard(confirm_data: str, cancel_data: str, confirm_text: str = "C
 def project_menu_keyboard(project: Project) -> InlineKeyboardMarkup:
     pid = project.id
     rows: list[list[InlineKeyboardButton]] = [
-        [_btn("🔎 Check progress", f"pj:{pid}:check"), _btn("ℹ️ Details", f"pj:{pid}:details")],
+        [_btn("🔎 Check progress", f"pj:{pid}:check"), _btn("📂 Files", f"pj:{pid}:files"), _btn("ℹ️ Details", f"pj:{pid}:details")],
         [_btn("📣 Announce", f"pj:{pid}:announce"), _btn("⏰ Remind", f"pj:{pid}:remind")],
         [_btn("👥 Assign designers", f"pj:{pid}:assign"), _btn("🏷 Edit metadata", f"pj:{pid}:meta")],
         [_btn("⚙️ Declared assets", f"pj:{pid}:decl"), _btn("💬 MG group", f"pj:{pid}:group")],
@@ -147,7 +147,7 @@ def search_card_keyboard(project: Project) -> InlineKeyboardMarkup:
     if project.drive_link:
         row.append(InlineKeyboardButton("📁 Open Archive", url=project.drive_link))
     row.append(_btn("ℹ️ Details", f"sr:{project.id}:details"))
-    return InlineKeyboardMarkup([row])
+    return InlineKeyboardMarkup([row, [_btn("📂 Files", f"sr:{project.id}:files")]])
 
 
 def previews_keyboard(project: Project, back_data: str | None = None) -> InlineKeyboardMarkup:

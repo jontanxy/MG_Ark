@@ -144,6 +144,10 @@ Each result:
 ```
 `Preview`: one preview → message with a "Play preview on Google Drive" URL button; several → one URL button per preview. `Open Archive`: URL button to the Drive folder. `Details`: full metadata + folder links + latest validation summary.
 
+## 7a. File listing
+
+`services/listing.py` walks the project folder (depth ≤ 6, OS junk hidden) and renders a tree: bot-created folders in archive order, other folders and files alphabetically, sizes, per-folder totals, "— empty" markers, folder names linked to Drive, split into numbered messages of ≤ 3500 raw characters. Reachable from the project menu (**Files**), every search card (**Files**) and `/files` in an MG Group (open projects of that group). Listings are cached per project for `STATUS_COOLDOWN_SECONDS` so repeated taps do not re-read Drive. Not offered for cancelled projects (folder in the trash).
+
 ## 8. Roles and authorisation
 
 | Capability | Super Admin | Team Lead | Designer |
