@@ -36,6 +36,7 @@ You do not need to read all of it. Find your role below and read the chapters li
 | **Designer** | 2 Getting started, 3 Finding past work, 4 Uploading your files, 9 Inside the MG Group, 11 Quick reference |
 | **Team Lead** | Everything except chapter 10 |
 | **Super Admin** | Everything |
+| **Lights** | 2 Getting started, 3 Finding past work (the preview part), 11 Quick reference |
 {widths:20,80}
 
 Each set of instructions is written as numbered steps. Where it helps, the manual shows you what the bot
@@ -65,22 +66,27 @@ you to message it privately.
 
 ## What your role allows
 
-There are three roles. Everyone starts as a Designer.
+There are four roles. Everyone starts as a Designer.
 
-| You can | Designer | Team Lead | Super Admin |
-|---|---|---|---|
-| Search the archive, watch previews, open archives | Yes | Yes | Yes |
-| List the files in an archive | Yes | Yes | Yes |
-| Create archives and manage them | No | Yes | Yes |
-| Assign designers and verify finished archives | No | Yes | Yes |
-| Create a new MG Group | No | Yes | Yes |
-| Open the project index sheet | No | Yes | Yes |
-| Add, promote, revoke or restore users | No | No | Yes |
-| Revoke or restore MG Groups | No | No | Yes |
-| Change the access password | No | No | Yes |
-{widths:46,18,18,18}
+| You can | Designer | Team Lead | Super Admin | Lights |
+|---|---|---|---|---|
+| Search the archive and watch previews | Yes | Yes | Yes | Yes |
+| Open the archive in Drive, see full details, list files | Yes | Yes | Yes | No |
+| Be given responsibility for uploading an asset | Yes | Yes | Yes | No |
+| Create archives and manage them | No | Yes | Yes | No |
+| Assign designers and verify finished archives | No | Yes | Yes | No |
+| Create a new MG Group | No | Yes | Yes | No |
+| Open the project index sheet | No | Yes | Yes | No |
+| Add, promote, revoke or restore users | No | No | Yes | No |
+| Revoke or restore MG Groups | No | No | Yes | No |
+| Change the access password | No | No | Yes | No |
+{widths:40,15,15,15,15}
 
-If you need a Team Lead role, ask the Super Admin to promote you. You do not need to register again.
+**Lights** is for people who run lighting during a service. They need to find a song and watch its
+preview, and nothing else. Their search results offer the preview only, and they are never asked to
+upload anything.
+
+If you need a different role, ask the Super Admin to change it. You do not need to register again.
 
 # Getting started
 
@@ -223,6 +229,9 @@ Easter Opening 2026
 | `Archived` | The state of the archive. `Archived` means it is finished and verified |
 | The four buttons | Watch a preview, open the folder in Google Drive, read the full record, or list every file in the archive |
 {widths:30,70}
+
+> **If your role is Lights**, your results show the **Preview** button only. Open Archive, Details and
+> Files are not part of Lights access. Everything else in this chapter works the same way.
 
 ## Watching a preview
 
@@ -759,6 +768,9 @@ Pick what to assign for. "All assets" covers every folder.
 
 3. Tap the people to switch them on or off, then tap **Done**.
 
+People with the Lights role are not in this list. Lights never upload anything, so they cannot be
+given responsibility for an asset.
+
 Use **All assets** for people who are responsible for the whole project. Use a specific folder group when
 one person is doing the After Effects work and someone else is doing the renders. The number in brackets
 tells you how many people are already assigned to that group.
@@ -1012,7 +1024,7 @@ messages. Those are meant to get your attention, so they are never quiet edits.
 | Command | Who can use it | What it does |
 |---|---|---|
 | `/status` | Everyone | Brings this group's progress messages to the bottom of the chat with fresh numbers |
-| `/files` | Everyone | Lists what has actually been uploaded for this group's archives, folder by folder |
+| `/files` | Everyone except Lights | Lists what has actually been uploaded for this group's archives, folder by folder |
 | `/remind` | Team Lead | Checks Drive and posts a reminder for anything missing |
 | `/help` | Everyone | Lists these commands |
 {widths:16,20,64}
@@ -1060,15 +1072,18 @@ Status: ACTIVE
 Telegram ID: 123456789
 Registered: 04 Feb 2026 09:12
 
-[ Make Team Lead ]
+[ Make Team Lead ]  [ Make Designer ]  [ Make Lights ]
 [ Revoke access ]
 [ All users ]
 ```
 
+The card offers every role except the one the person already has.
+
 | Button | Effect |
 |---|---|
 | **Make Team Lead** | The person can immediately create and manage archives. They do not register again |
-| **Make Designer** | Removes Team Lead rights. Their archives are untouched |
+| **Make Designer** | The standard role: upload assets, search, previews, and be assigned to projects |
+| **Make Lights** | Preview-only access, for lighting operators. They can search and play previews but cannot open the archive or be assigned uploads |
 | **Revoke access** | The person can no longer use the bot at all, and cannot register again with the password |
 | **Restore access** | Gives a revoked person their access back, with their previous role |
 {widths:26,74}
@@ -1122,7 +1137,7 @@ The bot sends you a private message when something needs your attention.
 
 | Alert | What it means | What to do |
 |---|---|---|
-| New user registered | Somebody used the access password and now has an account. Their name, handle and Telegram ID are included, with buttons to make them a Team Lead or open their card | If you do not recognise the name, the password has spread further than it should have. Revoke the account in `/users` and change the password |
+| New user registered | Somebody used the access password and now has an account. Their name, handle and Telegram ID are included, with buttons to make them a Team Lead, make them Lights, or open their card | If you do not recognise the name, the password has spread further than it should have. Revoke the account in `/users` and change the password |
 | Login lockout | Somebody entered the password wrongly five times. Their name and Telegram ID are included | If you recognise them, tell them the correct password. If you do not, consider changing the password |
 | Registration paused | Thirty wrong attempts across all accounts within ten minutes. Registration is paused automatically for fifteen minutes | This is the sign of a guessing attempt. Change the password with `/setpassword` |
 | Project index could not be updated | The Google Sheet could not be written | The bot keeps working. Once the cause is fixed, ask a Team Lead to send `/sheet rebuild` |
@@ -1156,7 +1171,7 @@ The bot sends you a private message when something needs your attention.
 | Command | Who | What it does |
 |---|---|---|
 | `/status` | Everyone | Bring this group's progress messages to the bottom, with fresh numbers |
-| `/files` | Everyone | List what has been uploaded, folder by folder |
+| `/files` | Everyone except Lights | List what has been uploaded, folder by folder |
 | `/remind` | Team Lead | Post reminders for missing uploads |
 | `/activate MG-XXXX-XXXX` | Team Lead | Authorise this group |
 | `/help` | Everyone | List the group commands |

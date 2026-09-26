@@ -59,7 +59,7 @@ are published separately in the *User Manual*.
 | Version | Date | Author | Summary |
 |---|---|---|---|
 | 1.0 | 18 September 2026 | Development Team | First released edition covering the complete 1.0.0 feature set |
-| 1.1 | 26 September 2026 | Development Team | Adds the file listing subsystem, the live status message, the group name synchronisation, the registration notice and the password reset tool |
+| 1.1 | 26 September 2026 | Development Team | Adds the Lights role, the file listing subsystem, the live status message, the group name synchronisation, the registration notice and the password reset tool |
 {widths:10,18,22,50}
 
 # System overview
@@ -114,7 +114,7 @@ provisioning, tracking, chasing and discovery.
 | Previews | ProRes masters in the declared delivery folders are transcoded to compact MP4 files stored on Drive and handed out as streaming links |
 | Discovery | A private search command performs conjunctive matching across name, tags and metadata, ranked by match quality |
 | Project index | A Google Sheet in the archive root holds one row per project and is kept in step automatically |
-| Access control | Password based registration, three fixed roles, revocation, group authorisation by token and brute force protection |
+| Access control | Password based registration, four fixed roles, revocation, group authorisation by token and brute force protection |
 {widths:22,78}
 
 ## Design principles
@@ -307,7 +307,7 @@ and must be unique, case insensitively, within their collection or within the to
 
 | Enumeration | Values |
 |---|---|
-| `Role` | `SUPER_ADMIN`, `TEAM_LEAD`, `DESIGNER` |
+| `Role` | `SUPER_ADMIN`, `TEAM_LEAD`, `DESIGNER`, `LIGHTS` |
 | `UserStatus` | `ACTIVE`, `REVOKED` |
 | `GroupStatus` | `ACTIVE`, `REVOKED` |
 | `ProjectStatus` | `DRAFT`, `ACTIVE`, `INCOMPLETE`, `READY_FOR_VERIFICATION`, `ARCHIVED`, `CANCELLED` |
@@ -663,8 +663,8 @@ and the parts are numbered. Splitting happens between lines, so a file entry is 
 | Entry point | Who | Scope |
 |---|---|---|
 | Project menu, **Files** | Team Lead | One project |
-| Search result card, **Files** | Everyone | One project, including archived ones |
-| `/files` in an MG Group | Everyone in that group | The group's open archives, up to six, most recent first |
+| Search result card, **Files** | Everyone except Lights | One project, including archived ones |
+| `/files` in an MG Group | Everyone in that group except Lights | The group's open archives, up to six, most recent first |
 {widths:34,22,44}
 
 Nothing is cached. Each invocation reads Drive again, which is the point: the listing is a statement
@@ -789,7 +789,7 @@ directing the user to a private chat, which is what keeps the shared channel rea
 | Group command | Minimum role | Function |
 |---|---|---|
 | `/status` | Designer | Bring this group's live progress messages to the bottom of the chat with fresh figures |
-| `/files` | Designer | List, folder by folder, what has been uploaded for this group's open archives |
+| `/files` | Designer | List, folder by folder, what has been uploaded for this group's open archives. Refused for Lights |
 | `/remind` | Team Lead | Post reminders for missing uploads |
 | `/activate <token>` | Team Lead | Authorise this group with a provisioning token |
 | `/help` | None | List the group commands |
@@ -907,16 +907,18 @@ access does not merely log someone out, it prevents them from coming back throug
 
 ## Authorisation
 
-| Capability | Super Admin | Team Lead | Designer |
-|---|---|---|---|
-| Search, preview, open archive | Yes | Yes | Yes |
-| Create and manage projects, assign designers, verify | Yes | Yes | No |
-| Create MG Group provisioning tokens | Yes | Yes | No |
-| Project index sheet | Yes | Yes | No |
-| Manage users, roles and revocation | Yes | No | No |
-| Manage and revoke MG Groups | Yes | No | No |
-| Change the access password | Yes | No | No |
-{widths:46,18,18,18}
+| Capability | Super Admin | Team Lead | Designer | Lights |
+|---|---|---|---|---|
+| Search the archive and play previews | Yes | Yes | Yes | Yes |
+| Open the Drive folder, read full details, list files | Yes | Yes | Yes | No |
+| Be assigned responsibility for an asset | Yes | Yes | Yes | No |
+| Create and manage projects, assign designers, verify | Yes | Yes | No | No |
+| Create MG Group provisioning tokens | Yes | Yes | No | No |
+| Project index sheet | Yes | Yes | No | No |
+| Manage users, roles and revocation | Yes | No | No | No |
+| Manage and revoke MG Groups | Yes | No | No | No |
+| Change the access password | Yes | No | No | No |
+{widths:40,15,15,15,15}
 
 Authorisation is enforced by a single decorator applied to every handler, which checks the chat scope, the
 existence and active status of the actor, the minimum role and, in a group, the group's authorisation. The
@@ -927,6 +929,37 @@ other row holding the role is demoted to Team Lead.
 The group rule is the conjunction required by the specification: an action in a group requires **both** an
 authorised user **and** an authorised MG Group. An unauthorised user in an authorised group is denied, and
 an authorised user in an unauthorised group is denied.
+
+## The Lights role
+
+Lights operators need to find a song and watch its preview during a service. They do not contribute
+assets and have no reason to reach the archive itself. The `LIGHTS` role expresses exactly that: it
+ranks alongside `DESIGNER`, so it clears the same private chat gate, but its surface is cut down to
+search and previews.
+
+| Surface | Behaviour for Lights |
+|---|---|
+| Search | Works normally. The result card carries a single **Preview** button |
+| Open Archive, Details, Files | Not offered, and the underlying callbacks are refused |
+| `/files` in a group | Refused with an explanation |
+| `/status` in a group | Allowed, because the group can already see that message |
+| Assignment to a project | Impossible. Lights are filtered out of every assignment list, and the service layer rejects the attempt by name |
+{widths:30,70}
+
+Two points of design are worth drawing out.
+
+The restriction is enforced at the handler, not merely by hiding buttons. A Lights user who replays
+a captured callback payload for **Details** or **Files** is refused, so no Drive link and no file
+name reaches them by that route. Hiding a button is presentation; refusing the callback is the
+control.
+
+Exclusion from assignment is enforced in `services/projects.py` rather than only in the keyboard that
+lists candidates. `CONTRIBUTOR_ROLES` names the roles that can hold an assignment, `list_assignable_users`
+filters the pickers, and `toggle_assignment` raises with the person's name and role if something
+slips through. This matters because an assigned Lights user would be mentioned in reminders for work
+they cannot deliver.
+
+The role is a plain string column, so introducing it required no database migration.
 
 ## Group authorisation
 
@@ -1238,8 +1271,8 @@ exercised without invoking a real one. Every test runs against a temporary SQLit
 | `test_core_services.py` | 23 | Users, roles, revocation, lockout, tokens, groups, group renaming, project creation and provisioning |
 | `test_validation_search_previews.py` | 8 | Leaf satisfaction, error semantics, state transitions, ranking order, preview planning and transcoding |
 | `test_jobs.py` | 2 | Scheduled scan and reminder behaviour |
-| `test_handlers.py` | 38 | End to end command and button flows through the fake Telegram application, including the live status message and two chat routing |
-| **Total** | **71** | |
+| `test_handlers.py` | 39 | End to end command and button flows through the fake Telegram application, including the live status message, two chat routing and the Lights restrictions |
+| **Total** | **72** | |
 {widths:34,12,54}
 
 ## Running the suite
