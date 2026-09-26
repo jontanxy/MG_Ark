@@ -88,9 +88,14 @@ def set_role(session: Session, telegram_id: int, role: Role, super_admin_id: int
         raise UserError("The Super Admin role is fixed and cannot be changed.")
     if role == Role.SUPER_ADMIN:
         raise UserError("Only the configured Super Admin can hold that role.")
+    was_lead = user.role == Role.TEAM_LEAD
     user.role = role
     if role not in CONTRIBUTOR_ROLES:
         _drop_assignments(session, telegram_id)  # a view-only role is never responsible for uploads
+    if was_lead and role != Role.TEAM_LEAD:
+        from .projects import release_led_projects  # local import: projects depends on users
+
+        release_led_projects(session, telegram_id)
     session.flush()
     return user
 
@@ -112,6 +117,9 @@ def revoke_user(session: Session, telegram_id: int, super_admin_id: int) -> User
         raise UserError("The Super Admin cannot be revoked.")
     user.status = UserStatus.REVOKED
     _drop_assignments(session, telegram_id)  # revocation ends every responsibility and every mention
+    from .projects import release_led_projects  # local import: projects depends on users
+
+    release_led_projects(session, telegram_id)
     session.flush()
     return user
 

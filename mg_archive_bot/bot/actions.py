@@ -215,8 +215,9 @@ async def check_project(
         await refresh_live_status(context, session, project, live_status_text(context, project, result.report), repost=live == "repost")
     if result.became_ready:
         outcome.group_notified = await post_to_group(context, project.mg_group_chat_id, notifications.ready_message(project))
-        if requested_by != project.created_by:
-            await notify_user(context, project.created_by, notifications.ready_message(project) + "\n\nOpen /projects to verify it.")
+        target = project_owner_id(context, project)
+        if requested_by != target:
+            await notify_user(context, target, notifications.ready_message(project) + "\n\nOpen /projects to verify it.")
     if jobs:
         worker = context.bot_data.get("preview_worker")
         if worker is not None:
@@ -248,6 +249,11 @@ async def send_preview(context: ContextTypes.DEFAULT_TYPE, chat_id: int, preview
 
 def user_by_id(session: Session, user_id: int | None) -> User | None:
     return session.get(User, user_id) if user_id is not None else None
+
+
+def project_owner_id(context: ContextTypes.DEFAULT_TYPE, project: Project) -> int:
+    """Who receives a project's DMs: its lead, or the Super Admin while the project has no lead."""
+    return project.lead_id if project.lead_id is not None else settings_of(context).super_admin_telegram_id
 
 
 def _listing_executor(context: ContextTypes.DEFAULT_TYPE) -> ThreadPoolExecutor:
@@ -357,7 +363,11 @@ async def sync_project_row(context: ContextTypes.DEFAULT_TYPE, project_id: int) 
             if row is None:  # revoked: the row disappears and everything below moves up
                 await asyncio.to_thread(tracking.delete_row, context.bot_data["sheets"], sheet_id, project_id)
             else:
-                await asyncio.to_thread(tracking.upsert_row, context.bot_data["sheets"], sheet_id, row)
+                outcome = await asyncio.to_thread(tracking.upsert_row, context.bot_data["sheets"], sheet_id, row)
+                if outcome == "needs_rebuild":  # column layout changed with a new version: rewrite every row
+                    with session_scope() as session:
+                        rows = tracking.all_rows(session, context.bot_data["tz"])
+                    await asyncio.to_thread(tracking.rebuild, context.bot_data["sheets"], sheet_id, rows)
         context.bot_data.pop("sheet_failure_reported", None)
     except Exception as exc:  # noqa: BLE001 - the index must never break the main flow
         await _report_sheet_failure(context, exc)

@@ -51,6 +51,8 @@ def announcement(project: Project, tree: list[FolderSpec]) -> str:
         lines.append(f"• {label}{link}" + (f"  👤 {_mentions(who)}" if who else ""))
     everyone = assignees_for(project, None)
     lines.append("")
+    if project.lead is not None:
+        lines.append(f"👑 <b>Lead:</b> {mention(project.lead.telegram_id, project.lead.display_name)}")
     lines.append(f"👥 <b>Assigned:</b> {_mentions(everyone)}")
     lines.append("")
     lines.append("Upload your files into the folders above. I check Google Drive automatically and will post progress here.")
@@ -160,6 +162,7 @@ def project_details(project: Project, report: ValidationReport | None, tree: lis
     who = assignees_for(project, None)
     if who:
         lines.append(f"<b>Assigned:</b> {_mentions(who)}")
+    lines.append(f"<b>Lead:</b> {esc(project.lead.display_name) if project.lead is not None else '⚠️ none — set one from the project menu'}")
     if creator:
         lines.append(f"<b>Created by:</b> {esc(creator.display_name)} · {esc(fmt_dt(project.created_at, tz))}")
     if project.status == ProjectStatus.CANCELLED:

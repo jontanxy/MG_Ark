@@ -782,7 +782,7 @@ async def test_project_index_sheet_is_kept_in_sync(harness, authorised_group, dr
     sheet_id = next(iter(harness.sheets.books))
     rows = harness.sheets.get_values(sheet_id, "'Projects'!A:Y")
     assert rows[0][0] == "ID" and len(rows) == 2
-    assert rows[1][2] == "Easter Opening 2026" and rows[1][3] == "Active" and rows[1][5] == "Easter Service" and "Dee Signer" in rows[1][15]
+    assert rows[1][2] == "Easter Opening 2026" and rows[1][3] == "Active" and rows[1][4] == "Lee Lead" and rows[1][6] == "Easter Service" and "Dee Signer" in rows[1][16]
     assert drive.path_of(sheet_id) == "Archive Root/MG Archive Index"
     with session_scope() as s:
         p = project_service.list_projects(s)[0]
@@ -798,7 +798,7 @@ async def test_project_index_sheet_is_kept_in_sync(harness, authorised_group, dr
     await harness.press(LEAD, f"pj:{pid}:verify2")
     await flush_sheet_syncs(ctx)
     rows = harness.sheets.get_values(sheet_id, "'Projects'!A:Y")
-    assert len(rows) == 2 and rows[1][3] == "Archived" and rows[1][7] == "cinematic" and rows[1][19] == "Lee Lead"
+    assert len(rows) == 2 and rows[1][3] == "Archived" and rows[1][8] == "cinematic" and rows[1][20] == "Lee Lead"
     # /sheet gives the link; /sheet rebuild rewrites it
     await harness.command(LEAD, "/sheet")
     assert f"https://docs.google.com/spreadsheets/d/{sheet_id}/edit" in bot.last(LEAD.id)["text"] and "1 project" in bot.last(LEAD.id)["text"]
@@ -1174,3 +1174,110 @@ async def test_lights_role_is_view_only(harness, authorised_group, drive):
     await harness.command(STRANGER, "/start")
     await harness.text(STRANGER, PASSWORD)
     assert ("💡 Make Lights", f"ad:u:{STRANGER.id}:role:LIGHTS") in harness.buttons(bot.last(ADMIN.id)["reply_markup"])
+
+
+@pytest.mark.asyncio
+async def test_project_lead_ownership(harness, authorised_group, drive):
+    """One Team Lead per project: the creator by default, chosen by the Super Admin otherwise; only the lead (or the Super Admin) manages it."""
+    from mg_archive_bot.bot.actions import flush_sheet_syncs
+
+    bot = harness.bot
+    other = FakeUser(2002, "Olga", "Other", username="olga")
+    with session_scope() as s:
+        user_service.register_designer(s, other.id, other.full_name, other.username)
+        user_service.set_role(s, other.id, Role.TEAM_LEAD, SUPER_ADMIN_ID)
+    # a Team Lead who creates a project is its lead; the announcement names them
+    await run_wizard(harness)
+    assert "Lead:</b> <a href=\"tg://user?id=2001\">Lee Lead</a>" in bot.last(GROUP.id)["text"]
+    with session_scope() as s:
+        p = project_service.list_projects(s)[0]
+        pid = p.id
+        assert p.lead_id == LEAD.id and project_service.can_manage(p.lead, p)
+        folders = {f.key: f.drive_id for f in p.folders}
+    # another Team Lead only gets the read-only menu and every management action is refused
+    q = await harness.press(other, f"pj:{pid}:menu")
+    labels = [t for t, _ in harness.buttons(q.edits[-1]["reply_markup"])]
+    assert "🔎 Check progress" in labels and "👥 Assign designers" not in labels and "✅ Verify & archive" not in labels and "👑 Project lead" not in labels
+    assert "Lead:</b> Lee Lead" in q.edits[-1]["text"]
+    for data in (f"pj:{pid}:assign", f"pj:{pid}:mf:style", f"pj:{pid}:dt:PSD", f"pj:{pid}:grp:none", f"pj:{pid}:verify2", f"pj:{pid}:revoke2", f"pj:{pid}:setlead:{other.id}", f"pj:{pid}:remind"):
+        q = await harness.press(other, data)
+        assert q.answers[-1] == ("Only this project's lead (or the Super Admin) can do that.", True), data
+    from mg_archive_bot.bot.access import set_prompt
+
+    set_prompt(harness.ctx(other), "meta_value", project_id=pid, field="style")
+    await harness.text(other, "hijacked")
+    with session_scope() as s:
+        p = project_service.get_project(s, pid)
+        assert p.style == "" and p.lead_id == LEAD.id and p.has_psd is False
+    # the lead and the Super Admin can; the Super Admin cannot be made lead, a Team Lead can
+    q = await harness.press(LEAD, f"pj:{pid}:lead")
+    assert any(d == f"pj:{pid}:setlead:{other.id}" for _, d in harness.buttons(q.edits[-1]["reply_markup"]))
+    assert not any(d == f"pj:{pid}:setlead:{ADMIN.id}" for _, d in harness.buttons(q.edits[-1]["reply_markup"]))
+    q = await harness.press(ADMIN, f"pj:{pid}:setlead:{ADMIN.id}")
+    assert "Super Admin cannot lead" in q.answers[-1][0]
+    q = await harness.press(ADMIN, f"pj:{pid}:setlead:{DESIGNER.id}")
+    assert "must hold the Team Lead role" in q.answers[-1][0]
+    q = await harness.press(ADMIN, f"pj:{pid}:setlead:{other.id}")
+    assert q.answers[-1][0] == "Lead: Olga Other" and "You are now the lead" in bot.last(other.id)["text"]
+    with session_scope() as s:
+        assert project_service.get_project(s, pid).lead_id == other.id
+    q = await harness.press(LEAD, f"pj:{pid}:assign")  # the former lead is now read-only
+    assert q.answers[-1][1] is True and "Only this project's lead" in q.answers[-1][0]
+    # DMs go to the lead, not the creator
+    for key in ("fonts", "ae", "timeline_prores", "timeline_hap", "contin_prores", "contin_hap"):
+        drive.put_file(folders[key], f"{key}.bin")
+    await harness.command(DESIGNER, "/status", chat=GROUP)
+    assert "Ready for Team Lead verification" in bot.last(other.id)["text"]
+    assert not any("Ready for Team Lead verification" in t for t in bot.texts(LEAD.id))
+    # the index sheet carries the lead
+    await flush_sheet_syncs(harness.ctx(ADMIN))
+    sheet_id = next(iter(harness.sheets.books))
+    assert harness.sheets.get_values(sheet_id, "'Projects'!A:Z")[1][4] == "Olga Other"
+    # revoking the lead frees the project; the Super Admin is told which projects need a new lead
+    q = await harness.press(ADMIN, f"ad:u:{other.id}:revoke")
+    assert "Projects without a lead" in q.edits[-1]["text"] and "Easter Opening 2026" in q.edits[-1]["text"]
+    with session_scope() as s:
+        assert project_service.get_project(s, pid).lead_id is None
+    q = await harness.press(LEAD, f"pj:{pid}:assign")  # nobody but the Super Admin until reassigned
+    assert "Only this project's lead" in q.answers[-1][0]
+    q = await harness.press(ADMIN, f"pj:{pid}:menu")
+    assert "none — set one" in q.edits[-1]["text"]
+    # demoting a lead to Designer also releases their projects
+    await harness.press(ADMIN, f"pj:{pid}:setlead:{LEAD.id}")
+    q = await harness.press(ADMIN, f"ad:u:{LEAD.id}:role:DESIGNER")
+    assert "Projects without a lead" in q.edits[-1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_super_admin_wizard_requires_choosing_a_lead(harness, authorised_group, drive):
+    bot = harness.bot
+    await harness.command(ADMIN, "/newproject")
+    await harness.press(ADMIN, "nw:col:none")
+    await harness.text(ADMIN, "Admin Made")
+    q = await harness.press(ADMIN, "nw:decl:done")
+    assert "Who is the <b>project lead</b>" in q.edits[-1]["text"]
+    buttons = harness.buttons(q.edits[-1]["reply_markup"])
+    assert ("👑 Lee Lead", f"nw:lead:{LEAD.id}") in buttons and not any(d.endswith(f":{ADMIN.id}") or d.endswith(f":{DESIGNER.id}") for _, d in buttons)
+    await harness.press(ADMIN, f"nw:lead:{DESIGNER.id}")  # crafted: not a Team Lead
+    assert "must hold the Team Lead role" in bot.last(ADMIN.id)["text"]
+    q = await harness.press(ADMIN, f"nw:lead:{LEAD.id}")
+    assert "Which MG Group" in q.edits[-1]["text"]
+    await harness.press(ADMIN, f"nw:grp:{GROUP.id}")
+    await harness.press(ADMIN, "nw:meta:skip")
+    q = await harness.press(ADMIN, "nw:asg:done")
+    assert "Lead:</b> Lee Lead" in q.edits[-1]["text"]
+    await harness.press(ADMIN, "nw:confirm")
+    with session_scope() as s:
+        p = [p for p in project_service.list_projects(s) if p.name == "Admin Made"][0]
+        assert p.lead_id == LEAD.id and p.created_by == ADMIN.id
+    assert "Lead:</b>" in bot.last(GROUP.id)["text"] and "Lee Lead" in bot.last(GROUP.id)["text"]
+    # with no Team Leads at all, the Super Admin is told to promote someone first
+    with session_scope() as s:
+        user_service.set_role(s, LEAD.id, Role.DESIGNER, SUPER_ADMIN_ID)
+    await harness.command(ADMIN, "/newproject")
+    await harness.press(ADMIN, "nw:col:none")
+    await harness.text(ADMIN, "No Leads Yet")
+    q = await harness.press(ADMIN, "nw:decl:done")
+    assert "Promote someone in /users" in q.edits[-1]["text"]
+    with session_scope() as s:
+        assert not [p for p in project_service.list_projects(s) if p.name == "No Leads Yet"]

@@ -41,7 +41,7 @@ def help_text(user: User | None, *, private: bool) -> str:
             "",
             "<b>Team Lead</b>",
             "/newproject — create a new archive (folders + announcement)",
-            "/projects — manage archives: progress, reminders, designers, metadata, verification",
+            "/projects — manage archives you lead: progress, reminders, designers, metadata, verification",
             "/creategroup — Create MG Group: token to authorise a new group",
             "/sheet — link to the project index sheet (one row per project)",
         ]

@@ -328,15 +328,15 @@ async def test_tracking_sheet_service(db, settings, drive):
         project_service.toggle_assignment(s, p, 11, AssetCategory.ALL)
         await project_service.provision_folders(s, p, drive, settings)
         row = tracking.build_row(s, p, tz)
-        assert row[:5] == [str(p.id), "", "Opening", "Active", "2026"] and row[9] == "gold, worship" and row[11] == "Yes" and row[12] == "No"
-        assert row[15] == "Alice" and row[23] == p.drive_link
+        assert row[:6] == [str(p.id), "", "Opening", "Active", "", "2026"] and row[10] == "gold, worship" and row[12] == "Yes" and row[13] == "No"
+        assert row[16] == "Alice" and row[24] == p.drive_link
         assert tracking.upsert_row(sheets, sheet_id, row) == "appended"
         p.status = ProjectStatus.ARCHIVED
         p.verified_by, p.verified_at = 1, p.created_at
         s.flush()
         assert tracking.upsert_row(sheets, sheet_id, tracking.build_row(s, p, tz)) == "updated"
         values = sheets.get_values(sheet_id, "'Projects'!A:Y")
-        assert len(values) == 2 and values[1][3] == "Archived" and values[1][18] != ""
+        assert len(values) == 2 and values[1][3] == "Archived" and values[1][19] != ""
         # rebuild rewrites everything from the database (drafts excluded)
         project_service.create_draft(s, "Draft only", 1, "Lead", 2026)
         assert tracking.rebuild(sheets, sheet_id, tracking.all_rows(s, tz)) == 1
@@ -434,6 +434,27 @@ def test_reset_password_tool(db, settings, capsys):
     assert reset_password.main([], settings=settings) == 2
     with session_scope() as s:
         assert user_service.verify_access_password(s, "brand-new-pass-2026!!")
+
+
+def test_lead_backfill_and_release(db):
+    with session_scope() as s:
+        user_service.register_designer(s, 21, "Lead One", None)
+        user_service.set_role(s, 21, Role.TEAM_LEAD, SUPER_ADMIN_ID)
+        user_service.ensure_super_admin(s, SUPER_ADMIN_ID, "Boss", None)
+        led = project_service.create_draft(s, "Led By Lead", 21, "Lead One", 2026)
+        by_admin = project_service.create_draft(s, "Made By Admin", SUPER_ADMIN_ID, "Boss", 2026)
+        assert led.lead_id == 21 and by_admin.lead_id is None
+        for p in (led, by_admin):
+            p.status = ProjectStatus.ACTIVE
+            p.lead_id = None
+        s.flush()
+        adopted, missing = project_service.backfill_leads(s)
+        assert adopted == 1 and missing == ["Made By Admin"]
+        with pytest.raises(ProjectError):
+            project_service.set_lead(s, by_admin, SUPER_ADMIN_ID)
+        project_service.set_lead(s, by_admin, 21)
+        assert [p.name for p in project_service.release_led_projects(s, 21)] == ["Led By Lead", "Made By Admin"]
+        assert led.lead_id is None and by_admin.lead_id is None
 
 
 def test_memory_database_rejected():

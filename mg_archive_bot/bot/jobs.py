@@ -96,7 +96,7 @@ class PreviewWorker:
                 return
             existing_drive_id = row.preview_drive_id
             project_name = row.project.full_name
-            created_by = row.project.created_by
+            created_by = row.project.lead_id if row.project.lead_id is not None else settings_of(self._ctx()).super_admin_telegram_id
         result = await asyncio.to_thread(process_preview, job, drive, settings, existing_drive_id)
         with session_scope() as session:
             record_result(session, job.preview_id, result)

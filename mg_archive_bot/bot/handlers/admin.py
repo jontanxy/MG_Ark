@@ -10,6 +10,7 @@ from ...constants import ROLE_LABELS, Role, UserStatus
 from ...db import session_scope
 from ...models import User
 from ...services import groups as group_service
+from ...services import projects as project_service
 from ...services import users as user_service
 from ...util import esc, fmt_dt
 from ..access import clear_prompt, parse_enum, parse_int, require, safe_edit, set_prompt, settings_of
@@ -137,7 +138,12 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, act
             if user is None:
                 await safe_edit(update, "User not found.")
                 return
-            await safe_edit(update, _user_card(user, context), user_card_keyboard(user, settings.super_admin_telegram_id))
+            note = ""
+            if action in ("role", "revoke"):
+                orphaned = [p.full_name for p in project_service.list_projects(session) if p.lead_id is None and p.status.value not in ("DRAFT", "CANCELLED", "ARCHIVED")]
+                if orphaned:
+                    note = "\n\n⚠️ <b>Projects without a lead:</b> " + ", ".join(esc(n) for n in orphaned[:10]) + " — set one via /projects → 👑 Project lead."
+            await safe_edit(update, _user_card(user, context) + note, user_card_keyboard(user, settings.super_admin_telegram_id))
             return
         if parts[1] == "g":
             chat_id = parse_int(parts[2] if len(parts) > 2 else None)
