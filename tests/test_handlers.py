@@ -256,7 +256,10 @@ async def run_wizard(harness, *, with_meta: bool = False, name: str = "Easter Op
     q = await harness.press(LEAD, "nw:decl:TIMELINE")
     assert any(t.startswith("✅ Timeline") for t, _ in harness.buttons(q.edits[-1]["reply_markup"]))
     await harness.press(LEAD, "nw:decl:CONTIN_VIDEOS")
-    q = await harness.press(LEAD, "nw:decl:done")  # exactly one group → auto-linked → metadata question
+    q = await harness.press(LEAD, "nw:decl:done")  # the group is always chosen explicitly, never auto-linked
+    assert "Which MG Group" in q.edits[-1]["text"]
+    assert any(d == f"nw:grp:{GROUP.id}" for _, d in harness.buttons(q.edits[-1]["reply_markup"]))
+    q = await harness.press(LEAD, f"nw:grp:{GROUP.id}")
     assert "Add metadata now" in q.edits[-1]["text"]
     if with_meta:
         await harness.press(LEAD, "nw:meta:yes")
@@ -650,6 +653,7 @@ async def test_double_tap_create_archive_provisions_once(harness, authorised_gro
     await harness.press(LEAD, "nw:col:none")
     await harness.text(LEAD, "Double Tap")
     await harness.press(LEAD, "nw:decl:done")
+    await harness.press(LEAD, f"nw:grp:{GROUP.id}")
     await harness.press(LEAD, "nw:meta:skip")
     await harness.press(LEAD, "nw:asg:done")
     results = await asyncio.gather(harness.press(LEAD, "nw:confirm"), harness.press(LEAD, "nw:confirm"))
@@ -881,3 +885,87 @@ async def test_revoke_removes_the_index_sheet_row(harness, authorised_group, dri
     await harness.press(LEAD, f"pj:{second}:restore")
     await flush_sheet_syncs(ctx)
     assert [r[2] for r in harness.sheets.get_values(sheet_id, "'Projects'!A:Y")[1:]] == ["First", "Third", "Second"]
+
+
+@pytest.mark.asyncio
+async def test_wizard_lets_team_lead_pick_between_groups(harness, authorised_group):
+    """Two projects, two chats: each archive is announced only in the chat chosen for it."""
+    bot = harness.bot
+    second = FakeChat(-100600, "supergroup", "Alabaster Team")
+    with session_scope() as s:
+        token = group_service.create_token(s, LEAD.id, 24)
+        group_service.authorise_group(s, second.id, second.title, token)
+    for name, chat in (("Keep On", GROUP), ("Alabaster Jar", second)):
+        await harness.command(LEAD, "/newproject")
+        await harness.press(LEAD, "nw:col:none")
+        await harness.text(LEAD, name)
+        q = await harness.press(LEAD, "nw:decl:done")
+        labels = {t: d for t, d in harness.buttons(q.edits[-1]["reply_markup"])}
+        assert labels["💬 MG Team"] == f"nw:grp:{GROUP.id}" and labels["💬 Alabaster Team"] == f"nw:grp:{second.id}"
+        assert "/creategroup" in q.edits[-1]["text"]
+        await harness.press(LEAD, f"nw:grp:{chat.id}")
+        await harness.press(LEAD, "nw:meta:skip")
+        q = await harness.press(LEAD, "nw:asg:done")
+        assert chat.title in q.edits[-1]["text"]
+        n_first, n_second = len(bot.texts(GROUP.id)), len(bot.texts(second.id))
+        await harness.press(LEAD, "nw:confirm")
+        assert (len(bot.texts(GROUP.id)) - n_first, len(bot.texts(second.id)) - n_second) == ((1, 0) if chat is GROUP else (0, 1))
+        assert f"New archive: {name}" in bot.last(chat.id)["text"]
+    with session_scope() as s:
+        linked = {p.name: p.mg_group_chat_id for p in project_service.list_projects(s)}
+        assert linked == {"Keep On": GROUP.id, "Alabaster Jar": second.id}
+
+
+@pytest.mark.asyncio
+async def test_wizard_without_any_group_explains_how_to_add_one(harness):
+    bot = harness.bot
+    await harness.command(LEAD, "/newproject")
+    await harness.press(LEAD, "nw:col:none")
+    await harness.text(LEAD, "Lonely Project")
+    q = await harness.press(LEAD, "nw:decl:done")
+    assert "No MG Group is authorised yet" in q.edits[-1]["text"] and "/creategroup" in q.edits[-1]["text"]
+    assert [d for _, d in harness.buttons(q.edits[-1]["reply_markup"])] == ["nw:grp:none"]
+    q = await harness.press(LEAD, "nw:grp:none")
+    assert "Add metadata now" in q.edits[-1]["text"]
+    await harness.press(LEAD, "nw:meta:skip")
+    q = await harness.press(LEAD, "nw:asg:done")
+    assert "nothing will be announced" in q.edits[-1]["text"]
+    q = await harness.press(LEAD, "nw:confirm")
+    assert "No MG Group linked" in q.edits[-1]["text"]
+    assert all(m["chat_id"] > 0 for m in bot.sent)  # nothing was posted to any group
+
+
+@pytest.mark.asyncio
+async def test_group_rename_is_reflected_in_selections(harness, authorised_group):
+    from mg_archive_bot.bot.jobs import refresh_group_titles_job
+
+    bot = harness.bot
+
+    def stored_title(chat_id=GROUP.id):
+        with session_scope() as s:
+            return group_service.get_group(s, chat_id).title
+
+    # 1. Telegram's rename service message updates the stored name immediately...
+    await harness.rename_group(GROUP, LEAD, "MG Team (Renamed)")
+    assert stored_title() == "MG Team (Renamed)"
+    # ...and the wizard's group choice shows it
+    await harness.command(LEAD, "/newproject")
+    await harness.press(LEAD, "nw:col:none")
+    await harness.text(LEAD, "Renamed Check")
+    q = await harness.press(LEAD, "nw:decl:done")
+    assert ("💬 MG Team (Renamed)", f"nw:grp:{GROUP.id}") in harness.buttons(q.edits[-1]["reply_markup"])
+    await harness.command(LEAD, "/cancel")
+    # 2. any command used inside the group syncs the name Telegram attaches to the update
+    await harness.command(DESIGNER, "/status", chat=FakeChat(GROUP.id, "supergroup", "MG Team v3"))
+    assert stored_title() == "MG Team v3"
+    # 3. the periodic refresh asks Telegram directly (covers renames made while the bot was offline)
+    bot.chat_titles[GROUP.id] = "MG Team v4"
+    with session_scope() as s:
+        token = group_service.create_token(s, LEAD.id, 24)
+        group_service.authorise_group(s, -100777, "Ghost", token)  # bot cannot reach this chat any more
+    await refresh_group_titles_job(harness.ctx(LEAD))
+    assert stored_title() == "MG Team v4" and stored_title(-100777) == "Ghost"
+    # a rename of a chat the bot does not know is ignored
+    await harness.rename_group(FakeChat(-100999, "supergroup", "Random"), STRANGER, "Random 2")
+    with session_scope() as s:
+        assert group_service.get_group(s, -100999) is None

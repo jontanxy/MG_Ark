@@ -180,8 +180,11 @@ def require(
                 await deny(update, "Your access has been revoked. Contact the Super Admin.")
                 return None
             if group and group_auth:
+                chat = update.effective_chat
                 with session_scope() as session:
-                    authorised = group_service.is_group_authorised(session, update.effective_chat.id)
+                    authorised = group_service.is_group_authorised(session, chat.id)
+                    if authorised:  # every update carries the chat's current name: keep ours in sync
+                        group_service.update_group_title(session, chat.id, chat.title or "")
                 if not authorised:
                     await deny(update, "This group is not an authorised MG Group. A Team Lead can authorise it with /activate <token>.")
                     return None

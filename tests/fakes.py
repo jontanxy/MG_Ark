@@ -39,6 +39,7 @@ class FakeBot:
         self.deleted: list[tuple[int, int]] = []
         self.commands: list[Any] = []
         self.fail_chats: set[int] = set()
+        self.chat_titles: dict[int, str] = {}  # what get_chat reports; unknown ids raise like Telegram does
 
     async def send_message(self, chat_id, text, reply_markup=None, **kwargs):
         from telegram.error import Forbidden
@@ -64,6 +65,13 @@ class FakeBot:
 
     async def get_me(self):
         return SimpleNamespace(username="mg_archive_test_bot", id=999)
+
+    async def get_chat(self, chat_id):
+        from telegram.error import BadRequest
+
+        if chat_id not in self.chat_titles:
+            raise BadRequest("Chat not found")
+        return SimpleNamespace(id=chat_id, title=self.chat_titles[chat_id], type="supergroup")
 
     async def set_my_commands(self, commands, scope=None, **kwargs):
         self.commands.append((commands, scope))
@@ -91,6 +99,7 @@ class FakeMessage:
         self.reply_markup = reply_markup
         self.message_id = next(_ids)
         self.migrate_to_chat_id: int | None = None
+        self.new_chat_title: str | None = None
         self.deleted = False
 
     async def reply_text(self, text, reply_markup=None, **kwargs):
@@ -240,6 +249,17 @@ class BotHarness:
                 await callback(update, self.ctx(user))
                 return query
         raise AssertionError(f"no callback handler for {data}")
+
+    async def rename_group(self, chat: FakeChat, by: FakeUser, new_title: str):
+        """Deliver the 'new_chat_title' service message Telegram sends when a group is renamed."""
+        from mg_archive_bot.bot.handlers.mg_groups import on_new_chat_title
+
+        renamed = FakeChat(chat.id, chat.type, new_title)
+        msg = FakeMessage(self.bot, renamed, from_user=by)
+        msg.new_chat_title = new_title
+        update = FakeUpdate(by, renamed, message=msg)
+        await on_new_chat_title(update, self.ctx(by))
+        return update
 
     async def chat_member(self, chat: FakeChat, by: FakeUser, old: str, new: str):
         from mg_archive_bot.bot.handlers.mg_groups import on_my_chat_member
