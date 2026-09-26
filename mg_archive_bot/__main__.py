@@ -76,6 +76,14 @@ def main() -> int:
         try:
             if user_service.seed_password_if_missing(session, settings.initial_access_password):
                 log.info("Access password seeded from INITIAL_ACCESS_PASSWORD")
+            elif settings.initial_access_password and not user_service.verify_access_password(
+                session, settings.initial_access_password
+            ):
+                log.warning(
+                    "INITIAL_ACCESS_PASSWORD in .env differs from the stored access password. It is only used on the "
+                    "very first start; to apply it run: python -m mg_archive_bot.tools.reset_password "
+                    "(or use /setpassword in Telegram)."
+                )
         except user_service.UserError as exc:
             log.error("%s", exc)
             return 2

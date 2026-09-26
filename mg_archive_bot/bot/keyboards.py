@@ -178,6 +178,13 @@ def users_list_keyboard(users: list[User]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+def new_user_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    """Shortcuts on the Super Admin's registration notice."""
+    return InlineKeyboardMarkup(
+        [[_btn("⬆️ Make Team Lead", f"ad:u:{user_id}:role:{Role.TEAM_LEAD.value}"), _btn("👤 Manage", f"ad:u:{user_id}")]]
+    )
+
+
 def user_card_keyboard(user: User, super_admin_id: int) -> InlineKeyboardMarkup:
     from ..constants import UserStatus
 

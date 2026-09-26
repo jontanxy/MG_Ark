@@ -55,6 +55,14 @@ async def test_start_and_password_registration(harness):
     assert "User registered" in bot.last(STRANGER.id)["text"] and "Role = Designer" in bot.last(STRANGER.id)["text"]
     with session_scope() as s:
         assert user_service.get_user(s, STRANGER.id).role == Role.DESIGNER
+    # the Super Admin is told, with a one-tap promotion
+    notice = bot.last(ADMIN.id)
+    assert "New user registered" in notice["text"] and "Ran Dom" in notice["text"] and str(STRANGER.id) in notice["text"]
+    assert ("⬆️ Make Team Lead", f"ad:u:{STRANGER.id}:role:TEAM_LEAD") in harness.buttons(notice["reply_markup"])
+    q = await harness.press(ADMIN, f"ad:u:{STRANGER.id}:role:TEAM_LEAD")
+    assert "Role: Team Lead" in q.edits[-1]["text"]
+    with session_scope() as s:
+        assert user_service.get_user(s, STRANGER.id).role == Role.TEAM_LEAD
     # second /start needs no password
     await harness.command(STRANGER, "/start")
     assert "Welcome back" in bot.last(STRANGER.id)["text"]
