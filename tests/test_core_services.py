@@ -404,6 +404,30 @@ async def test_file_listing_tree_and_rendering(db, settings, drive):
     assert text.startswith("📂 <b>Empty</b> — no files yet") and text.count("— empty") == 13  # every folder of a fresh tree
 
 
+def test_reset_password_tool(db, settings, capsys):
+    from mg_archive_bot.tools import reset_password
+
+    with session_scope() as s:
+        user_service.register_designer(s, 5, "Dee", None)
+        for _ in range(5):
+            user_service.record_failed_login(s, 77, 5, 15)  # someone is locked out
+        assert user_service.lock_remaining_seconds(s, 77) > 0
+    settings.initial_access_password = "brand-new-pass-2026!!"
+    assert reset_password.main([], settings=settings) == 0
+    assert "lockouts cleared" in capsys.readouterr().out
+    with session_scope() as s:
+        assert user_service.verify_access_password(s, "brand-new-pass-2026!!")
+        assert not user_service.verify_access_password(s, PASSWORD)
+        assert user_service.lock_remaining_seconds(s, 77) == 0
+        assert user_service.get_user(s, 5).status == UserStatus.ACTIVE  # existing users untouched
+    settings.initial_access_password = "short"
+    assert reset_password.main([], settings=settings) == 1  # rejected, nothing changed
+    settings.initial_access_password = ""
+    assert reset_password.main([], settings=settings) == 2
+    with session_scope() as s:
+        assert user_service.verify_access_password(s, "brand-new-pass-2026!!")
+
+
 def test_memory_database_rejected():
     from mg_archive_bot.db import make_engine
 

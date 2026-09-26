@@ -115,7 +115,15 @@ Or with Docker (ffmpeg included):
 docker compose up -d --build
 ```
 
-On first start the access password is seeded from `INITIAL_ACCESS_PASSWORD`; afterwards change it with `/setpassword`.
+On first start the access password is seeded from `INITIAL_ACCESS_PASSWORD`. **Editing `.env` later does not change
+it** (the bot logs a warning at startup when the two differ). To change it afterwards use `/setpassword` in Telegram,
+or apply the `.env` value on purpose with:
+
+```bash
+python -m mg_archive_bot.tools.reset_password
+```
+
+(`--prompt` asks for the password instead of reading `.env`; both also clear any login lockouts.)
 
 ## 5. First-time setup in Telegram
 
@@ -177,7 +185,8 @@ On first start the access password is seeded from `INITIAL_ACCESS_PASSWORD`; aft
 **Super Admin (private chat)**
 
 * `/users` (roles, revoke, restore), `/groups` (revoke → bot leaves the group; restore), `/setpassword`.
-* The Super Admin is also DM'd whenever someone gets locked out for repeated wrong passwords.
+* The Super Admin is DM'd whenever someone registers (with a one-tap **Make Team Lead** button) and whenever someone
+  gets locked out for repeated wrong passwords.
 
 ## 7. How validation and previews work
 
@@ -258,6 +267,7 @@ tail -n 50 data/bot.log
 
 | Symptom | Fix |
 |---|---|
+| "Incorrect password" although it matches `.env` | `INITIAL_ACCESS_PASSWORD` is only used on the first start. Run `python -m mg_archive_bot.tools.reset_password` or `/setpassword` |
 | `Configuration problem: DRIVE_ROOT_FOLDER_ID is required` | Set it in `.env` (or use `GOOGLE_AUTH_MODE=fake` to test without Google) |
 | `Google Drive error: … 404` when creating a project | The root folder is not shared with the service account / OAuth user — run `python -m mg_archive_bot.tools.drive_check` |
 | `ffmpeg not found` in preview failure messages | Install ffmpeg or set `FFMPEG_PATH` |

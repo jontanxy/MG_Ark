@@ -12,6 +12,7 @@ from ...services import users as user_service
 from ...util import esc
 from ..access import clear_prompt, is_private, may_reply_to_unregistered, password_breaker, resolve_actor, set_prompt, settings_of
 from ..actions import notify_user
+from ..keyboards import new_user_keyboard
 from .common import help_text
 
 log = logging.getLogger(__name__)
@@ -99,6 +100,17 @@ async def handle_password(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             + help_text(registered, private=True),
         )
         log.info("Registered user %s (%s)", tg_user.id, tg_user.full_name)
+        if tg_user.id != settings.super_admin_telegram_id:
+            handle = f" (@{esc(tg_user.username)})" if tg_user.username else ""
+            try:
+                await context.bot.send_message(
+                    settings.super_admin_telegram_id,
+                    f"👤 <b>New user registered:</b> {esc(tg_user.full_name)}{handle}\n"
+                    f"Telegram ID <code>{tg_user.id}</code> · role Designer",
+                    reply_markup=new_user_keyboard(tg_user.id),
+                )
+            except TelegramError as exc:
+                log.info("Cannot notify the Super Admin about a registration: %s", exc)
         return
     if breaker.record():  # too many wrong passwords across ALL accounts: pause registration, alert once
         log.warning("Password breaker opened after %d failures in %d min", settings.password_breaker_failures, settings.password_breaker_window_minutes)
