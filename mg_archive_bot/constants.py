@@ -9,14 +9,18 @@ class Role(str, enum.Enum):
     SUPER_ADMIN = "SUPER_ADMIN"
     TEAM_LEAD = "TEAM_LEAD"
     DESIGNER = "DESIGNER"
+    LIGHTS = "LIGHTS"  # view-only: search, previews, archive links; never assigned to projects
 
 
-ROLE_RANK: dict[Role, int] = {Role.DESIGNER: 0, Role.TEAM_LEAD: 1, Role.SUPER_ADMIN: 2}
+ROLE_RANK: dict[Role, int] = {Role.LIGHTS: 0, Role.DESIGNER: 0, Role.TEAM_LEAD: 1, Role.SUPER_ADMIN: 2}
 ROLE_LABELS: dict[Role, str] = {
     Role.SUPER_ADMIN: "Super Admin",
     Role.TEAM_LEAD: "Team Lead",
     Role.DESIGNER: "Designer",
+    Role.LIGHTS: "Lights",
 }
+# Roles that upload assets and can therefore be assigned to a project's folders.
+CONTRIBUTOR_ROLES = frozenset({Role.DESIGNER, Role.TEAM_LEAD, Role.SUPER_ADMIN})
 
 
 class UserStatus(str, enum.Enum):

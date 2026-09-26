@@ -142,8 +142,11 @@ def projects_list_keyboard(projects: list[Project], page: int, page_size: int, m
     return InlineKeyboardMarkup(rows)
 
 
-def search_card_keyboard(project: Project) -> InlineKeyboardMarkup:
+def search_card_keyboard(project: Project, *, view_only: bool = False) -> InlineKeyboardMarkup:
+    """Result-card buttons. Lights (``view_only``) get the preview only — no Drive links, details or file lists."""
     row = [_btn("▶️ Preview", f"sr:{project.id}:prev")]
+    if view_only:
+        return InlineKeyboardMarkup([row])
     if project.drive_link:
         row.append(InlineKeyboardButton("📁 Open Archive", url=project.drive_link))
     row.append(_btn("ℹ️ Details", f"sr:{project.id}:details"))
@@ -181,7 +184,13 @@ def users_list_keyboard(users: list[User]) -> InlineKeyboardMarkup:
 def new_user_keyboard(user_id: int) -> InlineKeyboardMarkup:
     """Shortcuts on the Super Admin's registration notice."""
     return InlineKeyboardMarkup(
-        [[_btn("⬆️ Make Team Lead", f"ad:u:{user_id}:role:{Role.TEAM_LEAD.value}"), _btn("👤 Manage", f"ad:u:{user_id}")]]
+        [
+            [
+                _btn("⬆️ Make Team Lead", f"ad:u:{user_id}:role:{Role.TEAM_LEAD.value}"),
+                _btn("💡 Make Lights", f"ad:u:{user_id}:role:{Role.LIGHTS.value}"),
+                _btn("👤 Manage", f"ad:u:{user_id}"),
+            ]
+        ]
     )
 
 
@@ -190,10 +199,8 @@ def user_card_keyboard(user: User, super_admin_id: int) -> InlineKeyboardMarkup:
 
     rows: list[list[InlineKeyboardButton]] = []
     if user.role != Role.SUPER_ADMIN and user.telegram_id != super_admin_id:
-        if user.role == Role.DESIGNER:
-            rows.append([_btn("⬆️ Make Team Lead", f"ad:u:{user.telegram_id}:role:{Role.TEAM_LEAD.value}")])
-        else:
-            rows.append([_btn("⬇️ Make Designer", f"ad:u:{user.telegram_id}:role:{Role.DESIGNER.value}")])
+        labels = {Role.TEAM_LEAD: "⬆️ Make Team Lead", Role.DESIGNER: "🎨 Make Designer", Role.LIGHTS: "💡 Make Lights"}
+        rows.append([_btn(text, f"ad:u:{user.telegram_id}:role:{role.value}") for role, text in labels.items() if role != user.role])
         if user.status == UserStatus.ACTIVE:
             rows.append([_btn("🚫 Revoke access", f"ad:u:{user.telegram_id}:revoke")])
         else:

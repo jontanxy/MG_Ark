@@ -49,6 +49,9 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE, actor: 
 @require(scope="group")
 async def cmd_files(update: Update, context: ContextTypes.DEFAULT_TYPE, actor: User) -> None:
     """Folder-by-folder file listing for this group's open archives."""
+    if actor.role == Role.LIGHTS:
+        await update.message.reply_text("Lights access is preview-only; ask a Team Lead for the file list.")
+        return
     chat_id = update.effective_chat.id
     with session_scope() as session:
         projects = project_service.list_projects(session, OPEN, group_chat_id=chat_id)

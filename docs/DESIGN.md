@@ -153,6 +153,7 @@ Each result:
 | Capability | Super Admin | Team Lead | Designer |
 |---|---|---|---|
 | /search, preview, open archive | ✔ | ✔ | ✔ |
+| **Lights** (extra role): search + Preview only — no Open Archive / Details / Files (buttons hidden and callbacks refused), no group `/files`, never assignable | — | — | preview-only |
 | /newproject, /projects, project menu (validate, announce, remind, assign, metadata, previews, verify, reopen) | ✔ | ✔ | ✖ |
 | /creategroup (provisioning token) | ✔ | ✔ | ✖ |
 | /setpassword, /users, /groups, revoke/restore user, set role, revoke group | ✔ | ✖ | ✖ |

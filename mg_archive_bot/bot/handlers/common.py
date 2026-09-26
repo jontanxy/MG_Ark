@@ -29,6 +29,10 @@ def help_text(user: User | None, *, private: bool) -> str:
     rank = ROLE_RANK[user.role] if user else -1
     lines = [
         "<b>Commands</b>",
+    ]
+    if user is not None and user.role == Role.LIGHTS:
+        lines.append("<i>Lights access: search the archive and play previews. No archive links or file lists, and you are never assigned uploads.</i>")
+    lines += [
         "/search &lt;terms&gt; — find archived projects (comma-separated, e.g. <code>worship, gold</code>)",
         "…or just type keywords to search. Every result offers Preview, Open Archive, Details and Files.",
     ]
