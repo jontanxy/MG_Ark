@@ -969,3 +969,76 @@ async def test_group_rename_is_reflected_in_selections(harness, authorised_group
     await harness.rename_group(FakeChat(-100999, "supergroup", "Random"), STRANGER, "Random 2")
     with session_scope() as s:
         assert group_service.get_group(s, -100999) is None
+
+
+@pytest.mark.asyncio
+async def test_live_status_message_is_edited_in_place(harness, authorised_group, drive):
+    from mg_archive_bot.bot.jobs import scan_job
+
+    bot = harness.bot
+    ctx = harness.ctx(LEAD)
+    await run_wizard(harness)
+    with session_scope() as s:
+        p = project_service.list_projects(s)[0]
+        pid, folders = p.id, {f.key: f.drive_id for f in p.folders}
+
+    def live_id():
+        with session_scope() as s:
+            return project_service.get_project(s, pid).status_message_id
+
+    n = len(bot.texts(GROUP.id))
+    # background scans never add messages to the chat
+    await scan_job(ctx)
+    assert len(bot.texts(GROUP.id)) == n and bot.edited == [] and live_id() is None
+    # /status creates the one live status message
+    await harness.command(DESIGNER, "/status", chat=GROUP)
+    assert len(bot.texts(GROUP.id)) == n + 1
+    first = bot.last(GROUP.id)["message_id"]
+    assert live_id() == first and "6 of 6 required folders still empty" in bot.last(GROUP.id)["text"]
+    # a designer uploads; the next background scan edits that message instead of posting
+    drive.put_file(folders["fonts"], "Font.otf")
+    await scan_job(ctx)
+    assert len(bot.texts(GROUP.id)) == n + 1
+    assert bot.edited[-1]["message_id"] == first and "Fonts</a> (1 file)" in bot.edited[-1]["text"]
+    assert "5 of 6 required folders still empty" in bot.messages[(GROUP.id, first)]["text"]
+    # a private "Check progress" also refreshes the group's message silently
+    drive.put_file(folders["ae"], "project.aep")
+    await harness.press(LEAD, f"pj:{pid}:check")
+    assert len(bot.texts(GROUP.id)) == n + 1 and "4 of 6" in bot.messages[(GROUP.id, first)]["text"]
+    # /status again moves the message to the bottom: old copy deleted, one new message
+    harness.bot_data.pop("limiters", None)
+    await harness.command(DESIGNER, "/status", chat=GROUP)
+    assert (GROUP.id, first) in bot.deleted and len(bot.texts(GROUP.id)) == n + 2
+    second = bot.last(GROUP.id)["message_id"]
+    assert live_id() == second
+    # when the old copy is too old to delete, it is marked outdated instead
+    bot.undeletable.add((GROUP.id, second))
+    harness.bot_data.pop("limiters", None)
+    await harness.command(DESIGNER, "/status", chat=GROUP)
+    assert "Outdated" in bot.messages[(GROUP.id, second)]["text"] and len(bot.texts(GROUP.id)) == n + 3
+    third = bot.last(GROUP.id)["message_id"]
+    # if a group admin deletes the live message, scans stay silent and the next /status re-creates it
+    bot.messages.pop((GROUP.id, third))
+    drive.put_file(folders["timeline_prores"], "loop.mov")
+    await scan_job(ctx)
+    assert len(bot.texts(GROUP.id)) == n + 3 and live_id() is None
+    harness.bot_data.pop("limiters", None)
+    await harness.command(DESIGNER, "/status", chat=GROUP)
+    assert len(bot.texts(GROUP.id)) == n + 4 and live_id() == bot.last(GROUP.id)["message_id"]
+    # completion: the live message shows the new state, and the READY notice is a separate ping
+    for key in ("timeline_hap", "contin_prores", "contin_hap"):
+        drive.put_file(folders[key], f"{key}.bin")
+    await scan_job(ctx)
+    assert "awaiting Team Lead verification" in bot.messages[(GROUP.id, live_id())]["text"]
+    assert "Ready for Team Lead verification" in bot.last(GROUP.id)["text"]
+    await harness.press(LEAD, f"pj:{pid}:verify")
+    await harness.press(LEAD, f"pj:{pid}:verify2")
+    assert "Archive verified and closed" in bot.messages[(GROUP.id, live_id())]["text"]
+    # relinking to another group forgets the message that lives in the old chat
+    other = FakeChat(-100600, "supergroup", "Other Team")
+    with session_scope() as s:
+        token = group_service.create_token(s, LEAD.id, 24)
+        group_service.authorise_group(s, other.id, other.title, token)
+    await harness.press(LEAD, f"pj:{pid}:group")
+    await harness.press(LEAD, f"pj:{pid}:grp:{other.id}")
+    assert live_id() is None

@@ -30,7 +30,7 @@ from ...services.projects import ProjectError
 from ...services.validation import latest_report
 from ...util import esc
 from ..access import clear_prompt, drive_of, project_lock, require, safe_edit, set_prompt, settings_of
-from ..actions import check_project, post_to_group, rebuild_sheet, schedule_sheet_sync, sheet_location, tree_of, user_by_id
+from ..actions import check_project, post_to_group, rebuild_sheet, refresh_live_status_from_latest, schedule_sheet_sync, sheet_location, tree_of, user_by_id
 from ..keyboards import (
     assign_category_keyboard,
     collection_choice_keyboard,
@@ -659,6 +659,7 @@ async def project_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, a
             schedule_sheet_sync(context, project.id)
             await query.answer("Archived ✅")
             verifier = user_by_id(session, actor.telegram_id)
+            await refresh_live_status_from_latest(context, session, project)
             await post_to_group(context, project.mg_group_chat_id, notifications.archived_message(project, verifier))
             await _show_menu(update, context, session, project, prefix="✅ <b>Archived.</b>\n\n")
             log.info("Project %s archived by %s", project.name, actor.telegram_id)
@@ -695,6 +696,7 @@ async def project_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, a
                 session.commit()
             schedule_sheet_sync(context, project.id)
             await query.answer("Project revoked")
+            await refresh_live_status_from_latest(context, session, project)
             await post_to_group(context, project.mg_group_chat_id, notifications.cancelled_message(project, user_by_id(session, actor.telegram_id), trashed))
             await _show_menu(update, context, session, project, prefix="🗑 <b>Revoked.</b> " + ("The Drive folder is in the trash.\n\n" if trashed else "\n\n"))
             log.info("Project %s revoked by %s", project.full_name, actor.telegram_id)
@@ -714,6 +716,7 @@ async def project_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, a
                 session.commit()
             schedule_sheet_sync(context, project.id)
             await query.answer("Restored")
+            await refresh_live_status_from_latest(context, session, project)
             await post_to_group(context, project.mg_group_chat_id, notifications.restored_message(project))
             await _show_menu(update, context, session, project, prefix="♻️ <b>Restored.</b>\n\n")
 
@@ -728,6 +731,7 @@ async def project_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, a
                 session.commit()
             schedule_sheet_sync(context, project.id)
             await query.answer("Reopened")
+            await refresh_live_status_from_latest(context, session, project)
             await post_to_group(context, project.mg_group_chat_id, notifications.reopened_message(project))
             await _show_menu(update, context, session, project, prefix="🔓 <b>Reopened.</b>\n\n")
 

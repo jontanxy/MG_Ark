@@ -190,6 +190,7 @@ Bot in a chat with no authorisation and no valid token within `UNAUTHORISED_GROU
 
 * **Announcement** (on creation / "Announce"): project name, Drive root link, per-folder links for required leaves, assigned designers (mentions).
 * **Progress / reminder** (`/status`, daily reminder job at `REMINDER_HOUR` local time, "Remind" button): ✅/❌ per required leaf, missing items with responsible designers mentioned. Reminder job skips projects reminded within the last 20 h and projects that are complete/archived.
+* **Live status**: one progress message per project (`projects.status_message_id`, content hash in `status_message_hash`). Scans, private checks and state changes (verify/reopen/restore/revoke) edit it in place, skipping the API call when the text is unchanged; background work never creates it. `/status` re-posts it at the bottom (old copy deleted, or edited to "outdated" when Telegram's 48-hour delete limit applies). Edits that fail with a BadRequest (message deleted by an admin) clear the id so the next `/status` re-creates it; relinking the project to another group clears it too.
 * **Ready for verification**: posted once when a scan flips the project to READY.
 * **Archived**: posted when the Team Lead verifies.
 
