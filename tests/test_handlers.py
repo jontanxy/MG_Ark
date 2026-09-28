@@ -1281,3 +1281,20 @@ async def test_super_admin_wizard_requires_choosing_a_lead(harness, authorised_g
     assert "Promote someone in /users" in q.edits[-1]["text"]
     with session_scope() as s:
         assert not [p for p in project_service.list_projects(s) if p.name == "No Leads Yet"]
+
+
+@pytest.mark.asyncio
+async def test_assignment_list_markers(harness, authorised_group):
+    """Team Leads carry ★ and the Super Admin 👁️‍🗨️ in assignment lists; Designers carry nothing."""
+    await harness.command(LEAD, "/newproject")
+    await harness.press(LEAD, "nw:col:none")
+    await harness.text(LEAD, "Markers")
+    await harness.press(LEAD, "nw:decl:done")
+    await harness.press(LEAD, f"nw:grp:{GROUP.id}")
+    q = await harness.press(LEAD, "nw:meta:skip")
+    labels = {d: t for t, d in harness.buttons(q.edits[-1]["reply_markup"])}
+    assert labels[f"nw:asg:{ADMIN.id}"] == "⬜️ Boss 👁️‍🗨️"
+    assert labels[f"nw:asg:{LEAD.id}"] == "⬜️ Lee Lead ★"
+    assert labels[f"nw:asg:{DESIGNER.id}"] == "⬜️ Dee Signer"
+    assert "👁️‍🗨️ = Super Admin" in q.edits[-1]["text"]
+    await harness.command(LEAD, "/cancel")

@@ -17,6 +17,8 @@ ASSIGNABLE = (
     AssetCategory.PSD,
 )
 MAX_USER_BUTTONS = 60
+# Markers after names in assignment lists (Designers carry none).
+ROLE_MARKERS = {Role.TEAM_LEAD: " ★", Role.SUPER_ADMIN: " 👁️‍🗨️"}
 
 
 def _btn(text: str, data: str) -> InlineKeyboardButton:
@@ -55,7 +57,7 @@ def user_toggle_keyboard(users: Iterable[User], selected: set[int], prefix: str,
     rows = []
     for u in list(users)[:MAX_USER_BUTTONS]:
         mark = "✅" if u.telegram_id in selected else "⬜️"
-        role = "★" if u.role != Role.DESIGNER else ""
+        role = ROLE_MARKERS.get(u.role, "")
         rows.append([_btn(f"{mark} {u.display_name}{role}", f"{prefix}:{u.telegram_id}")])
     rows.append([_btn(done_text, done_data)])
     return InlineKeyboardMarkup(rows)

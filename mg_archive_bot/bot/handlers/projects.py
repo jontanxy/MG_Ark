@@ -321,7 +321,7 @@ async def handle_wizard_meta(update: Update, context: ContextTypes.DEFAULT_TYPE,
 async def _wizard_assign_step(update: Update, context: ContextTypes.DEFAULT_TYPE, session: Session, project: Project) -> None:
     users = user_service.list_assignable_users(session)
     selected = {a.user_id for a in project.assignments if a.category == AssetCategory.ALL}
-    text = "👥 Who is working on this project? Toggle designers, then Done.\n<i>★ = Team Lead. Per-folder assignments can be refined later from the project menu.</i>"
+    text = "👥 Who is working on this project? Toggle designers, then Done.\n<i>★ = Team Lead, 👁️‍🗨️ = Super Admin. Per-folder assignments can be refined later from the project menu.</i>"
     kb = user_toggle_keyboard(users, selected, "nw:asg", "nw:asg:done")
     if update.callback_query is not None:
         await safe_edit(update, text, kb)
