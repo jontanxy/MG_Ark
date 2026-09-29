@@ -138,6 +138,11 @@ python -m mg_archive_bot.tools.reset_password
 
 (`--prompt` asks for the password instead of reading `.env`; both also clear any login lockouts.)
 
+**Updating to a newer version:** stop the bot, copy `data/mg_archive.sqlite3` somewhere safe, update the code and
+start the bot again. New database columns are added automatically at start-up and existing projects are left as
+they are. Going *back* to an older version is only safe with that copy: once a newer feature has been used (for
+example somebody was assigned to Titlebars), an older version cannot read those records.
+
 ## 5. First-time setup in Telegram
 
 1. **Super Admin**: open the bot, send `/start`. You are registered automatically with the Super Admin role.
@@ -157,7 +162,7 @@ python -m mg_archive_bot.tools.reset_password
 **Team Lead (private chat)**
 
 * `/newproject` — where it lives (top level, an existing collection, or a new collection such as `BF`) → name →
-  toggle Timeline / Contin Videos / Contin Lyrics / PSD → **pick the MG Group** (every authorised group is listed;
+  toggle Timeline / Contin Videos / Contin Lyrics / Titlebars / PSD → **pick the MG Group** (every authorised group is listed;
   the project is never linked to a chat silently) → optional metadata → assign designers → **Create archive**.
   Folders are created and the announcement with folder links is posted to the chosen group only.
 * One Team Lead can run several projects with separate group chats: each chat must be authorised once
@@ -190,7 +195,10 @@ python -m mg_archive_bot.tools.reset_password
   and refreshed on every status, metadata, assignment or group change; a nightly job rewrites the whole sheet from the
   database as a safety net.
 * `/sheet` (Team Lead) sends the link; `/sheet rebuild` rewrites it on demand. The sheet is plain data with a frozen,
-  filterable header row, so it stays readable for years (Google Sheets allows 10 million cells ≈ 400 000 projects).
+  filterable header row, so it stays readable for years (Google Sheets allows 10 million cells ≈ 370 000 projects).
+  Columns `A`–`AA` belong to the bot. When a new version adds a column (Titlebars was the latest), the column is
+  inserted in place on the first sync after the upgrade, so your filter views and anything you keep to the right
+  of the table move along with it. Do not keep per-project notes in the sheet: rows are rewritten in project order.
 * Requires the **Google Sheets API** to be enabled in the same Cloud project as the Drive API (APIs & Services →
   Library → Google Sheets API → Enable). If it is not, the bot keeps working and DMs the Super Admin once.
 
@@ -217,7 +225,9 @@ python -m mg_archive_bot.tools.reset_password
 * Every `SCAN_INTERVAL_MINUTES` (default 30) and on every manual check, the bot lists each required leaf folder on Drive
   (recursively, 3 levels). A leaf is satisfied when it contains at least one file. Required leaves are
   `Working File/Fonts`, `Working File/AE` (always) and, only if declared, `Timeline/ProRes 4444`, `Timeline/Hap/Hap Alpha`,
-  `Contin Videos/ProRes 4444`, `Contin Videos/Hap/Hap Alpha`, `Contin Lyrics/PNG`, `Working File/PSD`.
+  `Contin Videos/ProRes 4444`, `Contin Videos/Hap/Hap Alpha`, `Contin Lyrics/PNG`, `Titlebars` (one folder directly
+  under `Final Render`, without format folders), `Working File/PSD`. The `Titlebars` and `PSD` folders only exist in
+  projects that declare them (switching one on later, under **Declared assets**, creates the folder on Drive).
 * Each project has **one live status message** in its MG Group. Background scans and "Check progress" edit it in
   place (silently, no notification); `/status` moves it to the bottom of the chat with fresh numbers instead of
   posting another copy. The bot never creates that message on its own — the first `/status` does. Reminders and the
@@ -226,7 +236,8 @@ python -m mg_archive_bot.tools.reset_password
   A Team Lead then presses **Verify & archive** → **ARCHIVED** (announced). Removing files later makes it INCOMPLETE again.
 * Reminders go out daily at `REMINDER_HOUR` (in `TIMEZONE`) for INCOMPLETE projects, at most once per
   `REMINDER_MIN_GAP_HOURS`.
-* Previews: video files found in the declared `ProRes 4444` folders are downloaded, transcoded
+* Previews: video files found in the declared Timeline and Contin Videos `ProRes 4444` folders (not Titlebars,
+  which are overlays) are downloaded, transcoded
   (`H.264, ≤1280 px wide, CRF 26, faststart`) and uploaded to `<Project>/_Previews/` on Drive. The bot never uploads video
   to Telegram: **Preview** replies with a button that opens the MP4 in Google Drive's player, which streams the small
   file instantly (the multi-GB ProRes master is never opened). Previews are regenerated when the source file changes and

@@ -71,5 +71,8 @@ def _fast_scrypt(monkeypatch):
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
     for key in list(os.environ):
-        if key.startswith(("TELEGRAM_", "GOOGLE_", "DRIVE_", "SUPER_ADMIN", "INITIAL_ACCESS", "DATABASE_URL", "FAKE_FFMPEG")):
+        if key.startswith((
+            "TELEGRAM_", "GOOGLE_", "DRIVE_", "SUPER_ADMIN", "INITIAL_ACCESS", "DATABASE_URL", "FAKE_FFMPEG",
+            "FOLDER_NAME_", "TRACKING_", "PREVIEW", "TIMEZONE",
+        )):
             monkeypatch.delenv(key, raising=False)

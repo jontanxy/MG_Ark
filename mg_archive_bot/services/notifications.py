@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import tzinfo
 
 from ..constants import (
+    CATEGORY_FLAGS,
     CATEGORY_LABELS,
     STATUS_LABELS,
     AssetCategory,
@@ -157,7 +158,7 @@ def project_details(project: Project, report: ValidationReport | None, tree: lis
     if project.description:
         shown = project.description[:MAX_DESCRIPTION_SHOWN] + ("…" if len(project.description) > MAX_DESCRIPTION_SHOWN else "")
         lines += ["", esc(shown)]
-    declared = [CATEGORY_LABELS[c] for c in (AssetCategory.TIMELINE, AssetCategory.CONTIN_VIDEOS, AssetCategory.CONTIN_LYRICS, AssetCategory.PSD) if project.flag({AssetCategory.TIMELINE: "has_timeline", AssetCategory.CONTIN_VIDEOS: "has_contin_videos", AssetCategory.CONTIN_LYRICS: "has_contin_lyrics", AssetCategory.PSD: "has_psd"}[c])]
+    declared = [CATEGORY_LABELS[c] for c, flag in CATEGORY_FLAGS.items() if project.flag(flag)]
     lines += ["", f"<b>Declared assets:</b> {esc(', '.join(declared) if declared else 'Working files only')}"]
     ready = project.ready_previews
     lines.append(f"<b>Previews:</b> {len(ready)} available")

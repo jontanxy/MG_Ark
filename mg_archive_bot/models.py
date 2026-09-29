@@ -151,6 +151,7 @@ class Project(Base):
     has_timeline: Mapped[bool] = mapped_column(Boolean, default=False)
     has_contin_videos: Mapped[bool] = mapped_column(Boolean, default=False)
     has_contin_lyrics: Mapped[bool] = mapped_column(Boolean, default=False)
+    has_titlebars: Mapped[bool] = mapped_column(Boolean, default=False)
     has_psd: Mapped[bool] = mapped_column(Boolean, default=False)
 
     collection: Mapped[str] = mapped_column(String(200), default="")

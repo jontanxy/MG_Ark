@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from ..config import Settings
 from ..constants import (
+    OBSOLETE_FOLDER_KEYS,
     CATEGORY_FLAGS,
     CATEGORY_LABELS,
     CONTRIBUTOR_ROLES,
@@ -393,8 +394,30 @@ async def provision_folders(session: Session, project: Project, drive: DriveClie
     return project
 
 
+def forget_obsolete_folders(session: Session, project: Project) -> list[tuple[str, str, str]]:
+    """Drop the records of folders that an earlier layout created and the current one does not have.
+    Returns (key, name, link) of each, for the log.
+
+    Nothing is changed on Google Drive. The bot cannot know whether somebody is uploading into such a folder
+    (a file only exists on Drive once its upload has finished), so removing one is left to a person. Whatever a
+    folder holds or receives later keeps counting for the folder above it, as far as the check looks (three
+    levels below that folder).
+    """
+    rows = [f for f in project.folders if f.key in OBSOLETE_FOLDER_KEYS]
+    forgotten = [(f.key, f.name, f.link) for f in rows]
+    for row in rows:
+        project.folders.remove(row)
+    if rows:
+        session.flush()
+    return forgotten
+
+
 async def ensure_folders(session: Session, project: Project, drive: DriveClient, settings: Settings) -> list[str]:
-    """Create any folders missing from the tree (e.g. PSD enabled after creation). Returns created keys."""
+    """Create any folders missing from the tree (e.g. PSD enabled after creation). Returns created keys.
+
+    If Drive fails part-way (several assets were switched on), the folders that do exist are recorded and
+    committed before the error is raised again, so they are linked and checked, and a later call only adds the rest.
+    """
     if not project.drive_root_id:
         raise ProjectError("Project has no Drive folder yet.")
     tree = build_folder_tree(settings.folder_names())
@@ -407,23 +430,29 @@ async def ensure_folders(session: Session, project: Project, drive: DriveClient,
         return []
     known = {"root": project.drive_root_id, **{f.key: f.drive_id for f in project.folders}}
 
-    def _create() -> dict[str, str]:
+    def _create() -> tuple[dict[str, str], DriveError | None]:
         made: dict[str, str] = {}
-        for spec in missing:
-            parent_id = known.get(spec.parent_key or "root") or made.get(spec.parent_key or "root")
-            if parent_id is None:
-                continue
-            existing = drive.find_child_folder(spec.name, parent_id)
-            folder = existing or drive.create_folder(spec.name, parent_id)
-            made[spec.key] = folder.id
-            known[spec.key] = folder.id
-        return made
+        try:
+            for spec in missing:
+                parent_id = known.get(spec.parent_key or "root") or made.get(spec.parent_key or "root")
+                if parent_id is None:
+                    continue
+                existing = drive.find_child_folder(spec.name, parent_id)
+                folder = existing or drive.create_folder(spec.name, parent_id)
+                made[spec.key] = folder.id
+                known[spec.key] = folder.id
+        except DriveError as exc:
+            return made, exc
+        return made, None
 
-    made = await asyncio.to_thread(_create)
+    made, error = await asyncio.to_thread(_create)
     for spec in missing:
         if spec.key in made:
             _record_folder(session, project, spec.key, spec.name, made[spec.key])
     session.flush()
+    if error is not None:
+        session.commit()  # these folders are real on Drive now: callers roll back when they see the error
+        raise error
     return list(made)
 
 

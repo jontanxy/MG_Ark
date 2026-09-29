@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from ..config import Settings
 from ..constants import (
+    CATEGORY_FLAGS,
     PREVIEW_SOURCE_KEYS,
     VIDEO_EXTENSIONS,
     AssetCategory,
@@ -149,13 +150,7 @@ def scan_project_sync(project_snapshot: dict, folder_ids: dict[str, str], drive:
 
 async def validate_project(session: Session, project: Project, drive: DriveClient, settings: Settings) -> ScanResult:
     """Scan Drive, persist a ValidationRun, and apply the status transition."""
-    snapshot = {
-        "name": project.name,
-        "has_timeline": project.has_timeline,
-        "has_contin_videos": project.has_contin_videos,
-        "has_contin_lyrics": project.has_contin_lyrics,
-        "has_psd": project.has_psd,
-    }
+    snapshot = {"name": project.name, **{flag: project.flag(flag) for flag in CATEGORY_FLAGS.values()}}
     folder_ids = {f.key: f.drive_id for f in project.folders}
     items, sources = await asyncio.to_thread(scan_project_sync, snapshot, folder_ids, drive, settings)
     report = ValidationReport(

@@ -39,7 +39,7 @@ async def test_validation_only_checks_declared_assets(db, settings, drive):
         assert not report.complete and (result.old_status, result.new_status) == (ProjectStatus.ACTIVE, ProjectStatus.INCOMPLETE)
         required = {i.key for i in report.required_items}
         assert required == {"fonts", "ae", "contin_prores", "contin_hap", "lyrics_png"}
-        assert {i.key for i in report.items if not i.required} == {"psd", "timeline_prores", "timeline_hap"}
+        assert {i.key for i in report.items if not i.required} == {"psd", "timeline_prores", "timeline_hap", "titlebars"}
         # upload everything except Contin Videos / Hap
         drive.put_file(p.folder("fonts").drive_id, "Font.otf")
         sub = drive.create_folder("AE Project", p.folder("ae").drive_id)  # files in sub-folders count
@@ -257,3 +257,48 @@ async def test_notification_texts(db, settings, drive):
         assert reminder.startswith("⏰") and "Alice" in reminder
         details = notifications.project_details(p, result.report, tree, __import__("zoneinfo").ZoneInfo("UTC"))
         assert "Declared assets:</b> Timeline" in details and "Previews:</b> 0" in details
+
+
+@pytest.mark.asyncio
+async def test_titlebars_are_validated_only_when_declared(db, settings, drive):
+    tree = build_folder_tree(settings.folder_names())
+    with session_scope() as s:
+        user_service.register_designer(s, 21, "Tia", None)
+        p = await make_project(s, drive, settings, name="Titles", TITLEBARS=True)
+        project_service.toggle_assignment(s, p, 21, AssetCategory.TITLEBARS)
+        result = await validate_project(s, p, drive, settings)
+        assert {i.key for i in result.report.required_items} == {"fonts", "ae", "titlebars"}
+        assert result.new_status == ProjectStatus.INCOMPLETE
+        text = notifications.progress_message(p, result.report, tree, tz=None)
+        assert "Final Render / Titlebars</a>" in text and "Titlebars /" not in text  # one folder, no format folders
+        assert text.count("Tia") == 1  # the Titlebars assignee is named on the Titlebars folder only
+        announce = notifications.announcement(p, tree)
+        assert "• Final Render / Titlebars — " in announce and "Titlebars /" not in announce
+        details = notifications.project_details(p, result.report, tree, tz=None)
+        assert "<b>Declared assets:</b> Titlebars\n" in details and "<b>Asset type:</b> Working Files, Titlebars" in details
+        import re
+
+        reminder = re.sub(r"<[^>]+>", "", notifications.reminder_message(p, result.report, tree)).splitlines()
+        assert [line for line in reminder if "Titlebars" in line] == ["❌ Final Render / Titlebars  👤 Tia"]
+        assert sum("👤" in line for line in reminder) == 1  # Fonts and AE have nobody assigned
+        assert f'href="{p.folder("titlebars").link}"' in notifications.reminder_message(p, result.report, tree)
+
+        drive.put_file(p.folder("fonts").drive_id, "Font.otf")
+        drive.put_file(p.folder("ae").drive_id, "titles.aep")
+        result = await validate_project(s, p, drive, settings)
+        assert [i.key for i in result.report.missing] == ["titlebars"] and not result.report.complete
+        # any file makes it complete, whatever its format, also inside a folder the designer made
+        own = drive.create_folder("Lower thirds", p.folder("titlebars").drive_id)
+        drive.put_file(own.id, "Title_01.png")
+        result = await validate_project(s, p, drive, settings)
+        assert result.report.complete and result.became_ready
+        assert [(i.key, i.file_count) for i in result.report.required_items if i.key == "titlebars"] == [("titlebars", 1)]
+        drive.put_file(p.folder("titlebars").drive_id, "Title_02.mov", md5="t2", mime_type="video/quicktime")
+        result = await validate_project(s, p, drive, settings)
+        # titlebars are overlays: no MP4 previews are made from them
+        assert result.source_files == {} and plan_previews(s, p, result.source_files) == []
+
+        # switched off again: the uploaded files stay, the folder is simply no longer checked
+        project_service.set_declaration(s, p, AssetCategory.TITLEBARS, False)
+        result = await validate_project(s, p, drive, settings)
+        assert {i.key for i in result.report.required_items} == {"fonts", "ae"} and result.report.complete

@@ -50,6 +50,7 @@ class Settings(BaseSettings):
     folder_name_timeline: str = ""
     folder_name_contin_videos: str = ""
     folder_name_contin_lyrics: str = ""
+    folder_name_titlebars: str = ""
     folder_name_prores: str = ""
     folder_name_hap: str = ""
     folder_name_png: str = ""
@@ -107,6 +108,7 @@ class Settings(BaseSettings):
             "timeline": self.folder_name_timeline,
             "contin_videos": self.folder_name_contin_videos,
             "contin_lyrics": self.folder_name_contin_lyrics,
+            "titlebars": self.folder_name_titlebars,
             "prores": self.folder_name_prores,
             "hap": self.folder_name_hap,
             "png": self.folder_name_png,
