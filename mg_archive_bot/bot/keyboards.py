@@ -17,6 +17,8 @@ ASSIGNABLE = (
     AssetCategory.PSD,
 )
 MAX_USER_BUTTONS = 60
+# Markers after names in assignment lists (Designers carry none).
+ROLE_MARKERS = {Role.TEAM_LEAD: " ★", Role.SUPER_ADMIN: " 👁️‍🗨️"}
 
 
 def _btn(text: str, data: str) -> InlineKeyboardButton:
@@ -55,7 +57,7 @@ def user_toggle_keyboard(users: Iterable[User], selected: set[int], prefix: str,
     rows = []
     for u in list(users)[:MAX_USER_BUTTONS]:
         mark = "✅" if u.telegram_id in selected else "⬜️"
-        role = "★" if u.role != Role.DESIGNER else ""
+        role = ROLE_MARKERS.get(u.role, "")
         rows.append([_btn(f"{mark} {u.display_name}{role}", f"{prefix}:{u.telegram_id}")])
     rows.append([_btn(done_text, done_data)])
     return InlineKeyboardMarkup(rows)
@@ -80,7 +82,7 @@ def project_menu_keyboard(project: Project, *, manage: bool = True) -> InlineKey
     rows: list[list[InlineKeyboardButton]] = [
         [_btn("🔎 Check progress", f"pj:{pid}:check"), _btn("📂 Files", f"pj:{pid}:files"), _btn("ℹ️ Details", f"pj:{pid}:details")],
         [_btn("📣 Announce", f"pj:{pid}:announce"), _btn("⏰ Remind", f"pj:{pid}:remind")],
-        [_btn("👥 Assign designers", f"pj:{pid}:assign"), _btn("🏷 Edit metadata", f"pj:{pid}:meta")],
+        [_btn("👥 Assign designers", f"pj:{pid}:assign"), _btn("🏷 Edit metadata", f"pj:{pid}:meta"), _btn("✏️ Rename", f"pj:{pid}:rename")],
         [_btn("⚙️ Declared assets", f"pj:{pid}:decl"), _btn("💬 MG group", f"pj:{pid}:group")],
         [_btn("🎞 Generate previews", f"pj:{pid}:prev"), _btn("▶️ Previews", f"pj:{pid}:previews")],
         [_btn("👑 Project lead", f"pj:{pid}:lead")],

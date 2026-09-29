@@ -72,6 +72,7 @@ class DriveClient(Protocol):
     def upload(self, src: Path, parent_id: str, name: str, mime_type: str | None = None) -> DriveFile: ...
     def delete(self, file_id: str) -> None: ...
     def restore(self, file_id: str) -> None: ...
+    def rename(self, file_id: str, name: str) -> DriveFile: ...
 
 
 def _escape_query_value(value: str) -> str:
@@ -284,6 +285,10 @@ class GoogleDriveClient:
         """Take a file or folder back out of the trash."""
         self._run(self._service().files().update(fileId=file_id, body={"trashed": False}, fields="id", supportsAllDrives=True))
 
+    def rename(self, file_id: str, name: str) -> DriveFile:
+        item = self._run(self._service().files().update(fileId=file_id, body={"name": name}, fields=self.FIELDS, supportsAllDrives=True))
+        return self._to_file(item)
+
 
 # --------------------------------------------------------------------------------------
 # In-memory fake (tests, and GOOGLE_AUTH_MODE=fake for trying the bot without Google)
@@ -428,6 +433,15 @@ class InMemoryDriveClient:
             if node is None:
                 raise DriveError(f"file not found: {file_id}")
             node.trashed = False
+
+    def rename(self, file_id: str, name: str) -> DriveFile:
+        with self._lock:
+            node = self._nodes.get(file_id)
+            if node is None:
+                raise DriveError(f"file not found: {file_id}")
+            f = node.file
+            node.file = DriveFile(f.id, name, f.mime_type, f.size, f.md5, f.modified_time, f.parents, f.drive_id, f.trashed)
+            return node.file
 
 
 def build_drive_client(settings: Settings) -> DriveClient:

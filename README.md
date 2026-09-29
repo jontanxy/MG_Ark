@@ -174,7 +174,8 @@ python -m mg_archive_bot.tools.reset_password
   sheet, and can be changed via **👑 Project lead**. Revoking or demoting a lead frees their projects until a new lead
   is set (the Super Admin is told which ones).
 * `/projects` → project menu: **Check progress**, **Announce**, **Remind**, **Assign designers** (per folder group),
-  **Files** (folder-by-folder listing with names and sizes), **Edit metadata**, **Declared assets**, **MG group**,
+  **Files** (folder-by-folder listing with names and sizes), **Edit metadata**, **Rename** (renames the Drive folder
+  too; links keep working, the group is told), **Declared assets**, **MG group**,
   **Generate previews**, **Previews**, **Verify & archive**, **Reopen**, **Revoke project**, **Open in Google Drive**.
 * **Revoke project** (for a project that will not go ahead): after a confirmation, its Drive folder is moved to the
   trash, tracking and reminders stop, it disappears from search, its row is removed from the index sheet (rows below

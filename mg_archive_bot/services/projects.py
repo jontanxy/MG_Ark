@@ -299,6 +299,38 @@ def required_leaves(project: Project, tree: list[FolderSpec]) -> list[FolderSpec
     return [spec for spec in tree if spec.is_leaf and project.flag(spec.required_when)]
 
 
+async def rename_project(session: Session, project: Project, new_name: str, drive: DriveClient, settings: Settings) -> tuple[str, str]:
+    """Rename a project and its Drive folder. Returns (old name, new name). The Drive rename happens first, so a
+    Drive failure leaves the project untouched."""
+    if project.status in (ProjectStatus.DRAFT, ProjectStatus.CANCELLED):
+        raise ProjectError("Drafts and cancelled projects cannot be renamed.")
+    cleaned = validate_name(new_name)
+    if cleaned == project.name:
+        raise ProjectError("That is already the project's name.")
+    if name_in_use(session, cleaned, exclude_id=project.id, collection_id=project.collection_id):
+        where = f" in “{project.collection_folder.name}”" if project.collection_folder is not None else ""
+        raise ProjectError(f"A project named “{cleaned}” already exists{where}.")
+    old = project.name
+    if project.drive_root_id:
+        parent = project.collection_folder.drive_id if project.collection_folder is not None and project.collection_folder.drive_id else (
+            settings.drive_root_folder_id or getattr(drive, "ROOT_ID", "root")
+        )
+        root_id = project.drive_root_id
+
+        def _rename_folder() -> str:
+            folder_name = _unique_root_name(drive, cleaned, parent) if drive.find_child_folder(cleaned, parent) is not None else cleaned
+            drive.rename(root_id, folder_name)
+            return folder_name
+
+        folder_name = await asyncio.to_thread(_rename_folder)
+        root_row = project.folder("root")
+        if root_row is not None:
+            root_row.name = folder_name
+    project.name = cleaned
+    session.flush()
+    return old, cleaned
+
+
 def _unique_root_name(drive: DriveClient, name: str, parent_id: str) -> str:
     candidate = name
     for n in range(2, 50):

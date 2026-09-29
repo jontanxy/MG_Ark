@@ -87,7 +87,7 @@ def _tz(context: ContextTypes.DEFAULT_TYPE):
 
 MANAGE_ACTIONS = frozenset(
     {"announce", "remind", "assign", "asgcat", "asg", "meta", "mf", "decl", "dt", "group", "grp", "prev",
-     "verify", "verify2", "revoke", "revoke2", "restore", "reopen", "lead", "setlead"}
+     "verify", "verify2", "revoke", "revoke2", "restore", "reopen", "lead", "setlead", "rename"}
 )
 NOT_LEAD = "Only this project's lead (or the Super Admin) can do that."
 
@@ -321,7 +321,7 @@ async def handle_wizard_meta(update: Update, context: ContextTypes.DEFAULT_TYPE,
 async def _wizard_assign_step(update: Update, context: ContextTypes.DEFAULT_TYPE, session: Session, project: Project) -> None:
     users = user_service.list_assignable_users(session)
     selected = {a.user_id for a in project.assignments if a.category == AssetCategory.ALL}
-    text = "👥 Who is working on this project? Toggle designers, then Done.\n<i>★ = Team Lead. Per-folder assignments can be refined later from the project menu.</i>"
+    text = "👥 Who is working on this project? Toggle designers, then Done.\n<i>★ = Team Lead, 👁️‍🗨️ = Super Admin. Per-folder assignments can be refined later from the project menu.</i>"
     kb = user_toggle_keyboard(users, selected, "nw:asg", "nw:asg:done")
     if update.callback_query is not None:
         await safe_edit(update, text, kb)
@@ -516,6 +516,45 @@ async def handle_meta_value(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         )
 
 
+async def handle_rename(update: Update, context: ContextTypes.DEFAULT_TYPE, actor: User) -> None:
+    prompt = context.user_data.get("prompt") or {}
+    project_id = int(prompt.get("project_id", 0))
+    if ROLE_RANK[actor.role] < ROLE_RANK[Role.TEAM_LEAD]:
+        clear_prompt(context)
+        return
+    with session_scope() as session:
+        project = _load_project(session, project_id)
+        if project is None:
+            clear_prompt(context)
+            await update.message.reply_text("That project is no longer available.")
+            return
+        if not project_service.can_manage(actor, project):
+            clear_prompt(context)
+            await update.message.reply_text(NOT_LEAD)
+            return
+        async with project_lock(context, project.id):
+            session.refresh(project)
+            try:
+                old, new = await project_service.rename_project(session, project, update.message.text or "", drive_of(context), settings_of(context))
+            except ProjectError as exc:
+                await update.message.reply_text(f"❌ {esc(str(exc))} Send another name or /cancel.")
+                return
+            except DriveError as exc:
+                session.rollback()
+                await update.message.reply_text(f"❌ Google Drive refused to rename the folder: {esc(str(exc))}. The project keeps its name.")
+                return
+            session.commit()
+        clear_prompt(context)
+        schedule_sheet_sync(context, project.id)
+        await refresh_live_status_from_latest(context, session, project)
+        await post_to_group(context, project.mg_group_chat_id, notifications.renamed_message(old, project))
+        await update.message.reply_text(
+            f"✅ Renamed <b>{esc(old)}</b> → <b>{esc(project.full_name)}</b>.\n\n" + _menu_text(session, project, context),
+            reply_markup=project_menu_keyboard(project, manage=True),
+        )
+        log.info("Project %s renamed to %s by %s", old, project.name, actor.telegram_id)
+
+
 async def _assign_users_view(update: Update, session: Session, project: Project, category: AssetCategory) -> None:
     users = user_service.list_assignable_users(session)
     selected = {a.user_id for a in project.assignments if a.category == category}
@@ -667,6 +706,16 @@ async def project_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, a
         elif action == "meta":
             await query.answer()
             await safe_edit(update, _metadata_text(project), metadata_field_keyboard(project, METADATA_FIELDS))
+
+        elif action == "rename":
+            if project.status in (ProjectStatus.CANCELLED,):
+                await query.answer("Cancelled projects cannot be renamed.", show_alert=True)
+                return
+            await query.answer()
+            set_prompt(context, "rename", project_id=project.id)
+            await query.message.reply_text(
+                f"✏️ <b>Rename {esc(project.full_name)}</b>\n\nSend the new project name (2–100 characters). The Google Drive folder is renamed to match; links keep working.\n/cancel to abort."
+            )
 
         elif action == "mf":
             field = args[0]

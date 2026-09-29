@@ -1281,3 +1281,84 @@ async def test_super_admin_wizard_requires_choosing_a_lead(harness, authorised_g
     assert "Promote someone in /users" in q.edits[-1]["text"]
     with session_scope() as s:
         assert not [p for p in project_service.list_projects(s) if p.name == "No Leads Yet"]
+
+
+@pytest.mark.asyncio
+async def test_assignment_list_markers(harness, authorised_group):
+    """Team Leads carry ★ and the Super Admin 👁️‍🗨️ in assignment lists; Designers carry nothing."""
+    await harness.command(LEAD, "/newproject")
+    await harness.press(LEAD, "nw:col:none")
+    await harness.text(LEAD, "Markers")
+    await harness.press(LEAD, "nw:decl:done")
+    await harness.press(LEAD, f"nw:grp:{GROUP.id}")
+    q = await harness.press(LEAD, "nw:meta:skip")
+    labels = {d: t for t, d in harness.buttons(q.edits[-1]["reply_markup"])}
+    assert labels[f"nw:asg:{ADMIN.id}"] == "⬜️ Boss 👁️‍🗨️"
+    assert labels[f"nw:asg:{LEAD.id}"] == "⬜️ Lee Lead ★"
+    assert labels[f"nw:asg:{DESIGNER.id}"] == "⬜️ Dee Signer"
+    assert "👁️‍🗨️ = Super Admin" in q.edits[-1]["text"]
+    await harness.command(LEAD, "/cancel")
+
+
+@pytest.mark.asyncio
+async def test_rename_project(harness, authorised_group, drive):
+    from mg_archive_bot.bot.actions import flush_sheet_syncs
+    from mg_archive_bot.services.drive import DriveError
+
+    bot = harness.bot
+    other = FakeUser(2002, "Olga", "Other", username="olga")
+    with session_scope() as s:
+        user_service.register_designer(s, other.id, other.full_name, other.username)
+        user_service.set_role(s, other.id, Role.TEAM_LEAD, SUPER_ADMIN_ID)
+    await run_wizard(harness, with_meta=True)
+    await run_wizard(harness, name="Taken Name")
+    with session_scope() as s:
+        p = [p for p in project_service.list_projects(s) if p.name == "Easter Opening 2026"][0]
+        pid, root_id = p.id, p.drive_root_id
+    # only the lead (or Super Admin) may rename
+    q = await harness.press(other, f"pj:{pid}:rename")
+    assert q.answers[-1] == ("Only this project's lead (or the Super Admin) can do that.", True)
+    # validation keeps the prompt alive
+    await harness.press(LEAD, f"pj:{pid}:rename")
+    assert "Send the new project name" in bot.last(LEAD.id)["text"]
+    for bad, msg in (("x", "between 2 and 100"), ("taken name", "already exists"), ("Easter Opening 2026", "already the project"), ("Bad <b>", "cannot contain")):
+        await harness.text(LEAD, bad)
+        assert msg in bot.last(LEAD.id)["text"], bad
+    # Drive refusal keeps the old name
+    original = drive.rename
+
+    def refuse(file_id, name):
+        raise DriveError("quota")
+
+    drive.rename = refuse  # type: ignore[method-assign]
+    await harness.text(LEAD, "Easter Opening 2027")
+    assert "refused to rename" in bot.last(LEAD.id)["text"]
+    with session_scope() as s:
+        assert project_service.get_project(s, pid).name == "Easter Opening 2026"
+    drive.rename = original  # type: ignore[method-assign]
+    # success: project, Drive folder, group notice, live status and sheet all follow
+    await harness.command(DESIGNER, "/status", chat=GROUP)  # creates the live status message
+    await harness.press(LEAD, f"pj:{pid}:rename")
+    await harness.text(LEAD, "  Easter   Opening 2027 ")
+    assert "Renamed <b>Easter Opening 2026</b> → <b>Easter Opening 2027</b>" in bot.last(LEAD.id)["text"]
+    assert drive.get_file(root_id).name == "Easter Opening 2027" and drive.path_of(root_id) == "Archive Root/Easter Opening 2027"
+    assert "is now <b>Easter Opening 2027</b>" in bot.last(GROUP.id)["text"]
+    with session_scope() as s:
+        p = project_service.get_project(s, pid)
+        assert p.name == "Easter Opening 2027" and p.folder("root").name == "Easter Opening 2027" and p.drive_root_id == root_id
+        assert "Easter Opening 2027" in bot.messages[(GROUP.id, p.status_message_id)]["text"]
+    await flush_sheet_syncs(harness.ctx(LEAD))
+    sheet_id = next(iter(harness.sheets.books))
+    assert [r[2] for r in harness.sheets.get_values(sheet_id, "'Projects'!A:Z")[1:]] == ["Easter Opening 2027", "Taken Name"]
+    # a same-named folder already on Drive gets a suffix, the project name itself stays exact
+    drive.create_folder("Clash", drive.ROOT_ID)
+    await harness.press(LEAD, f"pj:{pid}:rename")
+    await harness.text(LEAD, "Clash")
+    with session_scope() as s:
+        p = project_service.get_project(s, pid)
+        assert p.name == "Clash" and drive.get_file(root_id).name == "Clash (2)"
+    # cancelled projects cannot be renamed
+    await harness.press(LEAD, f"pj:{pid}:revoke")
+    await harness.press(LEAD, f"pj:{pid}:revoke2")
+    q = await harness.press(LEAD, f"pj:{pid}:rename")
+    assert q.answers[-1][1] is True and "Cancelled projects" in q.answers[-1][0]

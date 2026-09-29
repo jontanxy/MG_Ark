@@ -131,6 +131,10 @@ def restored_message(project: Project) -> str:
     return f"♻️ <b>{esc(project.full_name)}</b> has been restored; its Drive folder is back and tracking has resumed."
 
 
+def renamed_message(old_name: str, project: Project) -> str:
+    return f"✏️ <b>{esc(old_name)}</b> is now <b>{esc(project.full_name)}</b>. The Google Drive folder was renamed too; existing links keep working."
+
+
 def reopened_message(project: Project) -> str:
     return f"🟢 <b>{esc(project.full_name)}</b> has been reopened for further uploads."
 
