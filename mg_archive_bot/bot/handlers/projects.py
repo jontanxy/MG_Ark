@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from telegram import Update
 from telegram.ext import ContextTypes
@@ -20,7 +21,7 @@ from ...constants import (
     Role,
 )
 from ...db import session_scope
-from ...models import Project, User
+from ...models import Collection, Project, User
 from ...services import collections as collection_service
 from ...services import groups as group_service
 from ...services import notifications
@@ -30,7 +31,19 @@ from ...services.drive import DriveError
 from ...services.projects import ProjectError
 from ...services.validation import latest_report
 from ...util import clip_message, esc
-from ..access import clear_prompt, drive_of, parse_enum, parse_int, project_lock, require, safe_edit, set_prompt, settings_of
+from ..access import (
+    clear_prompt,
+    drive_of,
+    get_prompt,
+    parse_enum,
+    parse_int,
+    placement_lock,
+    project_lock,
+    require,
+    safe_edit,
+    set_prompt,
+    settings_of,
+)
 from ..actions import (
     check_project,
     may_list_files,
@@ -45,8 +58,10 @@ from ..actions import (
     user_by_id,
 )
 from ..keyboards import (
+    MAX_COLLECTION_BUTTONS,
     assign_category_keyboard,
     collection_choice_keyboard,
+    collection_move_keyboard,
     back_to_project_keyboard,
     confirm_keyboard,
     confirm_revoke_keyboard,
@@ -87,7 +102,7 @@ def _tz(context: ContextTypes.DEFAULT_TYPE):
 
 MANAGE_ACTIONS = frozenset(
     {"announce", "remind", "assign", "asgcat", "asg", "meta", "mf", "decl", "dt", "group", "grp", "prev",
-     "verify", "verify2", "revoke", "revoke2", "restore", "reopen", "lead", "setlead", "rename"}
+     "verify", "verify2", "revoke", "revoke2", "restore", "reopen", "lead", "setlead", "rename", "col", "setcol"}
 )
 NOT_LEAD = "Only this project's lead (or the Super Admin) can do that."
 
@@ -206,9 +221,13 @@ async def handle_collection_name(update: Update, context: ContextTypes.DEFAULT_T
         return
     with session_scope() as session:
         try:
-            collection = collection_service.create_collection(session, update.message.text or "", actor.telegram_id)
+            name = project_service.validate_name(update.message.text or "")
+            if collection_service.find_by_name(session, name) is None and collection_service.taken_by_top_level_project(session, name):
+                raise ProjectError(collection_service.name_taken_message(name))
+            collection = collection_service.create_collection(session, name, actor.telegram_id)
         except ProjectError as exc:
-            await update.message.reply_text(f"❌ {esc(str(exc))}\nSend another collection name or /cancel.")
+            reason = str(exc).replace("Project name", "Collection name")
+            await update.message.reply_text(f"❌ {esc(reason)}\nSend another collection name or /cancel.")
             return
         session.commit()
         context.user_data.setdefault("wizard", {})["collection_id"] = collection.id
@@ -349,7 +368,7 @@ async def _wizard_summary(update: Update, context: ContextTypes.DEFAULT_TYPE, se
 
 async def _wizard_create(update: Update, context: ContextTypes.DEFAULT_TYPE, session: Session, project: Project, actor: User) -> None:
     await safe_edit(update, "⏳ Creating folders on Google Drive…")
-    async with project_lock(context, project.id):  # a double tap must not provision two trees
+    async with project_lock(context, project.id), placement_lock(context):  # a double tap must not provision two trees
         session.refresh(project)
         if project.status != ProjectStatus.DRAFT:
             context.user_data.pop("wizard", None)
@@ -532,7 +551,15 @@ async def handle_rename(update: Update, context: ContextTypes.DEFAULT_TYPE, acto
             clear_prompt(context)
             await update.message.reply_text(NOT_LEAD)
             return
-        async with project_lock(context, project.id):
+        requested = " ".join((update.message.text or "").split())[:100]
+        await _say_if_waiting(update, context, project.id)
+        async with project_lock(context, project.id), placement_lock(context):
+            if not _prompt_pending(context, prompt):
+                await update.message.reply_text(
+                    f"ℹ️ <b>{esc(project.full_name)}</b> was not renamed to “{esc(requested)}”: that step was closed before its turn came. "
+                    "Press Rename again to repeat it."
+                )
+                return
             session.refresh(project)
             try:
                 old, new = await project_service.rename_project(session, project, update.message.text or "", drive_of(context), settings_of(context))
@@ -544,7 +571,7 @@ async def handle_rename(update: Update, context: ContextTypes.DEFAULT_TYPE, acto
                 await update.message.reply_text(f"❌ Google Drive refused to rename the folder: {esc(str(exc))}. The project keeps its name.")
                 return
             session.commit()
-        clear_prompt(context)
+            _close_prompt(context, prompt)
         schedule_sheet_sync(context, project.id)
         await refresh_live_status_from_latest(context, session, project)
         await post_to_group(context, project.mg_group_chat_id, notifications.renamed_message(old, project))
@@ -553,6 +580,150 @@ async def handle_rename(update: Update, context: ContextTypes.DEFAULT_TYPE, acto
             reply_markup=project_menu_keyboard(project, manage=True),
         )
         log.info("Project %s renamed to %s by %s", old, project.name, actor.telegram_id)
+
+
+MOVED, UNCHANGED, REFUSED, FAILED, ABANDONED = "moved", "unchanged", "refused", "failed", "abandoned"
+
+
+def _prompt_pending(context: ContextTypes.DEFAULT_TYPE, prompt: dict | None) -> bool:
+    """Whether the text step this handler was started for is still the open one. A /cancel, a command, a button
+    press, its expiry, and the same step opened once more (that is a new prompt) all close it."""
+    return bool(prompt) and get_prompt(context) is prompt
+
+
+def _close_prompt(context: ContextTypes.DEFAULT_TYPE, prompt: dict | None) -> None:
+    """Close the text step that was just carried out, but not one that the user has opened since."""
+    if prompt and context.user_data.get("prompt") is prompt:
+        clear_prompt(context)
+
+
+async def _say_if_waiting(update: Update, context: ContextTypes.DEFAULT_TYPE, project_id: int) -> None:
+    """A rename, move or new archive by somebody else is in progress: say so instead of staying silent."""
+    if placement_lock(context).locked() or project_lock(context, project_id).locked():
+        await update.effective_message.reply_text("⏳ Another change to the archive is in progress. Yours is next, one moment…")
+
+
+def _collection_menu_text(project: Project, collections: list) -> str:
+    where = f"in the collection <b>{esc(project.collection_folder.name)}</b>" if project.collection_folder is not None else "at the top level (in no collection)"
+    lines = [
+        f"📂 <b>{esc(project.name)}</b> is {where}.",
+        "",
+        "Where should it live? Its Google Drive folder is moved too; links keep working and nothing inside the folder changes.",
+    ]
+    if project.collection_id is None and project.collection:
+        lines.append(f"<i>Its Collection label “{esc(project.collection)}” will be replaced by the name of the collection.</i>")
+    offered = [c for c in collections if c.id != project.collection_id]
+    if len(offered) > MAX_COLLECTION_BUTTONS:
+        lines.append(
+            f"<i>Showing {MAX_COLLECTION_BUTTONS} of {len(offered)} collections. For one that is not listed, press "
+            "“New collection…” and send its name: an existing collection is re-used.</i>"
+        )
+    return "\n".join(lines)
+
+
+async def _move_project(
+    context: ContextTypes.DEFAULT_TYPE,
+    session: Session,
+    project: Project,
+    actor: User,
+    target_id: int | None,
+    *,
+    new_name: str | None = None,
+    prompt: dict | None = None,
+) -> tuple[str, str]:
+    """Move *project* into the collection *target_id* (``None`` = top level), or into the collection called
+    *new_name*, which is created when it does not exist (the text prompt).
+
+    Returns (MOVED, html), (UNCHANGED, html: it is there already), (REFUSED, plain reason: the request itself
+    cannot be done), (FAILED, plain reason: Google Drive did not do it; the request can be repeated) or
+    (ABANDONED, ""): the text step was closed while this handler was waiting for its turn.
+    """
+    async with project_lock(context, project.id), placement_lock(context):
+        if new_name is not None and not _prompt_pending(context, prompt):
+            return ABANDONED, ""
+        session.refresh(project)
+        if new_name is not None:
+            # looked up under the lock; a new collection is only stored once the move has happened
+            target = collection_service.find_by_name(session, new_name) or Collection(name=new_name, created_by=actor.telegram_id)
+        else:
+            target = collection_service.get_collection(session, target_id)
+            if target_id is not None and target is None:
+                return REFUSED, "That collection no longer exists."
+        old_collection = project.collection_folder.name if project.collection_folder is not None else None
+        if target is not None and target.id is not None and project.collection_id == target.id:
+            return UNCHANGED, f"ℹ️ <b>{esc(project.name)}</b> is already in <b>{esc(target.name)}</b>."
+        try:
+            old_display = await project_service.move_project(session, project, target, drive_of(context), settings_of(context))
+            session.commit()
+        except ProjectError as exc:
+            session.rollback()
+            return REFUSED, str(exc)
+        except DriveError as exc:
+            session.rollback()
+            return FAILED, f"Google Drive did not confirm the move: {exc}. Nothing was changed in the bot; you can try again."
+        except SQLAlchemyError:
+            session.rollback()
+            log.exception("The move of project %s could not be saved", project.id)
+            return FAILED, (
+                "The bot could not save the change. If the Google Drive folder was moved already, "
+                "choosing the same collection again puts the record right."
+            )
+        if new_name is not None:
+            _close_prompt(context, prompt)
+    schedule_sheet_sync(context, project.id)
+    await refresh_live_status_from_latest(context, session, project)
+    await post_to_group(context, project.mg_group_chat_id, notifications.moved_message(old_collection, project))
+    log.info("Project %s (%s) is now %s, moved by %s", project.id, old_display, project.full_name, actor.telegram_id)
+    if project.collection_folder is None:
+        return MOVED, f"✅ <b>{esc(project.name)}</b> was taken out of <b>{esc(old_collection or '')}</b> and now sits at the top level."
+    return MOVED, f"✅ <b>{esc(project.name)}</b> is now in <b>{esc(project.collection_folder.name)}</b>."
+
+
+async def handle_move_collection_name(update: Update, context: ContextTypes.DEFAULT_TYPE, actor: User) -> None:
+    """The name typed after “New collection…” in a project's Collection menu."""
+    prompt = context.user_data.get("prompt") or {}
+    project_id = int(prompt.get("project_id", 0))
+    if ROLE_RANK[actor.role] < ROLE_RANK[Role.TEAM_LEAD]:
+        clear_prompt(context)
+        return
+    with session_scope() as session:
+        project = _load_project(session, project_id)
+        if project is None:
+            clear_prompt(context)
+            await update.message.reply_text("That project is no longer available.")
+            return
+        if not project_service.can_manage(actor, project):
+            clear_prompt(context)
+            await update.message.reply_text(NOT_LEAD)
+            return
+        if project.status == ProjectStatus.CANCELLED:
+            clear_prompt(context)
+            await update.message.reply_text("This project was cancelled in the meantime. Restore it before moving it.")
+            return
+        try:
+            name = project_service.validate_name(update.message.text or "")
+        except ProjectError as exc:
+            reason = str(exc).replace("Project name", "Collection name")
+            await update.message.reply_text(f"❌ {esc(reason)}\nSend another collection name or /cancel.")
+            return
+        await _say_if_waiting(update, context, project.id)
+        outcome, message = await _move_project(context, session, project, actor, None, new_name=name, prompt=prompt)
+        if outcome == ABANDONED:
+            await update.message.reply_text(
+                f"ℹ️ <b>{esc(project.name)}</b> was not moved to “{esc(name)}”: that step was closed before its turn came. "
+                "Open Collection again to repeat it."
+            )
+            return
+        if outcome == UNCHANGED:
+            await update.message.reply_text(f"{message}\nSend another collection name or /cancel.")
+            return
+        if outcome != MOVED:
+            hint = "Send another collection name or /cancel." if outcome == REFUSED else "Send the name again to retry, or /cancel."
+            await update.message.reply_text(f"❌ {esc(message)}\n{hint}")
+            return
+        await update.message.reply_text(
+            f"{message}\n\n" + _menu_text(session, project, context), reply_markup=project_menu_keyboard(project, manage=True)
+        )
 
 
 async def _assign_users_view(update: Update, session: Session, project: Project, category: AssetCategory) -> None:
@@ -716,6 +887,42 @@ async def project_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, a
             await query.message.reply_text(
                 f"✏️ <b>Rename {esc(project.full_name)}</b>\n\nSend the new project name (2–100 characters). The Google Drive folder is renamed to match; links keep working.\n/cancel to abort."
             )
+
+        elif action == "col":
+            if project.status == ProjectStatus.CANCELLED:
+                await query.answer("Restore the project before moving it.", show_alert=True)
+                return
+            await query.answer()
+            collections = collection_service.list_collections(session)
+            await safe_edit(update, _collection_menu_text(project, collections), collection_move_keyboard(project, collections))
+
+        elif action == "setcol":
+            arg = args[0] if args else ""
+            if project.status == ProjectStatus.CANCELLED:
+                await query.answer("Restore the project before moving it.", show_alert=True)
+                return
+            if arg == "new":
+                await query.answer()
+                set_prompt(context, "move_collection", project_id=project.id)
+                await query.message.reply_text(
+                    f"📂 Send the <b>collection name</b> for <b>{esc(project.name)}</b> (e.g. <i>BF</i>). "
+                    "An existing collection with that name is re-used.\n/cancel to abort."
+                )
+                return
+            target_id = None if arg == "none" else parse_int(arg)
+            if arg != "none" and target_id is None:
+                await query.answer("Invalid request.", show_alert=True)
+                return
+            await query.answer()  # acknowledged now: waiting for Google Drive can take longer than Telegram allows
+            await safe_edit(update, f"⏳ Moving <b>{esc(project.name)}</b> and its Google Drive folder…")  # no buttons meanwhile
+            outcome, message = await _move_project(context, session, project, actor, target_id)
+            if outcome in (REFUSED, FAILED):
+                collections = collection_service.list_collections(session)
+                await safe_edit(
+                    update, f"❌ {esc(message)}\n\n" + _collection_menu_text(project, collections), collection_move_keyboard(project, collections)
+                )
+                return
+            await _show_menu(update, context, session, project, prefix=f"{message}\n\n", actor=actor)
 
         elif action == "mf":
             field = args[0]

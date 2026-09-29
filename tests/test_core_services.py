@@ -969,3 +969,425 @@ async def test_ensure_folders_keeps_what_drive_created_before_failing(db, settin
         assert await project_service.ensure_folders(s, p, drive, settings) == ["titlebars"]  # only the rest
         assert [f.name for f in drive.list_children(p.folder("final_render").drive_id)].count("Titlebars") == 1
         assert [f.name for f in drive.list_children(p.folder("working_file").drive_id)].count("PSD") == 1
+
+
+def test_fake_drive_moves_folders_like_google(drive):
+    from mg_archive_bot.services.drive import DriveError
+
+    a = drive.create_folder("A", drive.ROOT_ID)
+    b = drive.create_folder("B", drive.ROOT_ID)
+    project = drive.create_folder("Project", a.id)
+    inner = drive.create_folder("Working File", project.id)
+    clip = drive.put_file(inner.id, "clip.mov")
+    moved = drive.move(project.id, b.id)
+    assert moved.id == project.id and moved.parents == (b.id,) and moved.name == "Project"
+    assert drive.path_of(clip.id) == "Archive Root/B/Project/Working File/clip.mov"  # everything inside travels along
+    assert drive.list_children(a.id) == [] and [f.id for f in drive.list_children(b.id)] == [project.id]
+    assert drive.move(project.id, drive.ROOT_ID, "Project (2)").name == "Project (2)"
+    assert drive.path_of(inner.id) == "Archive Root/Project (2)/Working File"
+    for file_id, parent in ((project.id, inner.id), (project.id, project.id), ("missing", a.id), (project.id, "missing"), (project.id, clip.id)):
+        with pytest.raises(DriveError):
+            drive.move(file_id, parent)
+    drive.delete(b.id)
+    with pytest.raises(DriveError):
+        drive.move(project.id, b.id)  # a folder in the trash is not a destination
+    assert drive.path_of(project.id) == "Archive Root/Project (2)"
+
+
+def test_google_drive_move_is_one_request():
+    """The real client moves (and renames) with a single files.update, for Shared Drives too."""
+    from mg_archive_bot.services.drive import DriveError, GoogleDriveClient
+
+    class Request:
+        def __init__(self, result):
+            self.result = result
+
+        def execute(self, num_retries=0):
+            return self.result
+
+    class Files:
+        def __init__(self):
+            self.item = {"id": "f1", "name": "Opening", "mimeType": "application/vnd.google-apps.folder", "parents": ["old"]}
+            self.updates: list[dict] = []
+
+        def get(self, **kwargs):
+            return Request(dict(self.item))
+
+        def update(self, **kwargs):
+            self.updates.append(kwargs)
+            if "addParents" in kwargs:
+                self.item["parents"] = [kwargs["addParents"]]
+            self.item.update(kwargs.get("body") or {})
+            return Request(dict(self.item))
+
+    files = Files()
+    client = GoogleDriveClient(credentials=None)
+    client._service = lambda: type("Service", (), {"files": lambda self: files})()  # type: ignore[method-assign]
+    moved = client.move("f1", "new")
+    assert moved.parents == ("new",) and moved.name == "Opening"
+    assert files.updates == [{"fileId": "f1", "body": {}, "fields": GoogleDriveClient.FIELDS, "supportsAllDrives": True, "addParents": "new", "removeParents": "old"}]
+    assert client.move("f1", "newer", "Opening (2)").name == "Opening (2)"
+    assert files.updates[-1]["body"] == {"name": "Opening (2)"} and files.updates[-1]["removeParents"] == "new"
+    # already there with that name: nothing is sent
+    assert client.move("f1", "newer", "Opening (2)").parents == ("newer",) and len(files.updates) == 2
+    # only the name differs: a rename in place, no parent is added or removed
+    client.move("f1", "newer", "Opening")
+    assert files.updates[-1] == {"fileId": "f1", "body": {"name": "Opening"}, "fields": GoogleDriveClient.FIELDS, "supportsAllDrives": True}
+
+    # Google applied the move but the answer was lost, and the repeated request is refused: that is a success
+    class Lost(Request):
+        def __init__(self, files, apply):
+            self.files, self.apply = files, apply
+
+        def execute(self, num_retries=0):
+            if self.apply:
+                self.files.item["parents"] = ["lost-and-found"]
+                self.files.item["name"] = "Opening (3)"
+            raise OSError("connection reset")
+
+    real_update = files.update
+    files.update = lambda **kwargs: Lost(files, apply=True)  # type: ignore[method-assign]
+    moved = client.move("f1", "lost-and-found", "Opening (3)")
+    assert moved.parents == ("lost-and-found",) and moved.name == "Opening (3)"
+    # it really was not applied: the failure is reported
+    files.update = lambda **kwargs: Lost(files, apply=False)  # type: ignore[method-assign]
+    with pytest.raises(DriveError, match="unreachable"):
+        client.move("f1", "elsewhere")
+    assert files.item["parents"] == ["lost-and-found"]
+    files.update = real_update  # type: ignore[method-assign]
+
+    # the folder is gone: nothing is sent
+    sent = len(files.updates)
+    files.get = lambda **kwargs: Request(None)  # type: ignore[method-assign]
+    client.get_file = lambda file_id: None  # type: ignore[method-assign]
+    with pytest.raises(DriveError, match="no longer exists"):
+        client.move("f1", "x")
+    assert len(files.updates) == sent
+
+
+@pytest.mark.asyncio
+async def test_move_project_service(db, settings, drive):
+    from mg_archive_bot.services import collections as collection_service
+
+    with session_scope() as s:
+        bf = collection_service.create_collection(s, "Building Fund 2026", 1)
+        easter = collection_service.create_collection(s, "Easter", 1)
+        p = project_service.create_draft(s, "God I'm Just Thankful", 1, "Lead", 2026, bf)
+        with pytest.raises(ProjectError, match="Drafts and cancelled"):
+            await project_service.move_project(s, p, None, drive, settings)
+        await project_service.provision_folders(s, p, drive, settings)
+        s.commit()
+        ids = {f.key: f.drive_id for f in p.folders}
+        assert drive.path_of(ids["ae"]) == "Archive Root/Building Fund 2026/God I'm Just Thankful/Working File/AE"
+        assert p.full_name == "Building Fund 2026 / God I'm Just Thankful" and p.collection == "Building Fund 2026"
+        assert easter.drive_id is None  # its folder does not exist yet
+
+        with pytest.raises(ProjectError, match="already in “Building Fund 2026”"):
+            await project_service.move_project(s, p, bf, drive, settings)
+        # out of the collection
+        assert await project_service.move_project(s, p, None, drive, settings) == "Building Fund 2026 / God I'm Just Thankful"
+        s.commit()
+        assert (p.collection_id, p.collection, p.collection_folder, p.full_name) == (None, "", None, "God I'm Just Thankful")
+        assert drive.path_of(ids["ae"]) == "Archive Root/God I'm Just Thankful/Working File/AE"
+        assert {f.key: f.drive_id for f in p.folders} == ids and p.drive_root_id == ids["root"]  # same folders, same links
+        assert [f.name for f in drive.list_children(bf.drive_id)] == []  # the collection stays, now empty
+        with pytest.raises(ProjectError, match="not in a collection"):
+            await project_service.move_project(s, p, None, drive, settings)
+        # into a collection whose folder is created on the way
+        assert await project_service.move_project(s, p, easter, drive, settings) == "God I'm Just Thankful"
+        s.commit()
+        assert easter.drive_id is not None and drive.path_of(easter.drive_id) == "Archive Root/Easter"
+        assert (p.collection_id, p.collection, p.full_name) == (easter.id, "Easter", "Easter / God I'm Just Thankful")
+        assert drive.path_of(ids["ae"]) == "Archive Root/Easter/God I'm Just Thankful/Working File/AE"
+        # straight from one collection to another
+        await project_service.move_project(s, p, bf, drive, settings)
+        s.commit()
+        assert drive.path_of(ids["root"]) == "Archive Root/Building Fund 2026/God I'm Just Thankful" and p.collection == "Building Fund 2026"
+
+        # names stay unique inside the destination
+        twin = project_service.create_draft(s, "god i'm just thankful", 1, "Lead", 2026)
+        await project_service.provision_folders(s, twin, drive, settings)
+        s.commit()
+        with pytest.raises(ProjectError, match="already exists in “Building Fund 2026”. Rename one of them first"):
+            await project_service.move_project(s, twin, bf, drive, settings)
+        with pytest.raises(ProjectError, match="already exists at the top level"):
+            await project_service.move_project(s, p, None, drive, settings)
+        assert drive.path_of(twin.drive_root_id) == "Archive Root/god i'm just thankful" and twin.collection_id is None
+        # a folder of that name that the bot does not know: the Drive folder gets a suffix, the project keeps its name
+        drive.create_folder("God I'm Just Thankful", easter.drive_id)
+        await project_service.move_project(s, p, easter, drive, settings)
+        s.commit()
+        assert p.name == "God I'm Just Thankful" and p.folder("root").name == "God I'm Just Thankful (2)"
+        assert drive.path_of(ids["root"]) == "Archive Root/Easter/God I'm Just Thankful (2)"
+        # ... and gets its own name back where it is free
+        await project_service.move_project(s, p, bf, drive, settings)
+        s.commit()
+        assert p.folder("root").name == "God I'm Just Thankful" and drive.path_of(ids["root"]) == "Archive Root/Building Fund 2026/God I'm Just Thankful"
+
+        # archived projects can be re-filed, cancelled ones cannot
+        p.status = ProjectStatus.ARCHIVED
+        await project_service.move_project(s, p, easter, drive, settings)
+        s.commit()
+        assert drive.path_of(ids["root"]) == "Archive Root/Easter/God I'm Just Thankful (2)" and p.status == ProjectStatus.ARCHIVED
+        p.status = ProjectStatus.CANCELLED
+        with pytest.raises(ProjectError, match="Drafts and cancelled"):
+            await project_service.move_project(s, p, bf, drive, settings)
+        assert p.collection_id == easter.id and drive.path_of(ids["root"]) == "Archive Root/Easter/God I'm Just Thankful (2)"
+
+
+@pytest.mark.asyncio
+async def test_move_project_inside_a_configured_archive_folder(db, settings, drive):
+    """With DRIVE_ROOT_FOLDER_ID set, "top level" is that folder, never the top of the Drive."""
+    from mg_archive_bot.services import collections as collection_service
+
+    archive = drive.create_folder("Shared Archive", drive.ROOT_ID)
+    configured = settings.model_copy(update={"drive_root_folder_id": archive.id})
+    with session_scope() as s:
+        easter = collection_service.create_collection(s, "Easter", 1)
+        p = project_service.create_draft(s, "Song", 1, "Lead", 2026, easter)
+        await project_service.provision_folders(s, p, drive, configured)
+        s.commit()
+        root_id = p.drive_root_id
+        assert drive.path_of(root_id) == "Archive Root/Shared Archive/Easter/Song"
+        await project_service.move_project(s, p, None, drive, configured)
+        s.commit()
+        assert drive.path_of(root_id) == "Archive Root/Shared Archive/Song"
+        # somebody moved the folder by hand in Google Drive: the bot's move to that same place repairs the record
+        drive.move(root_id, easter.drive_id)
+        assert p.collection_id is None
+        await project_service.move_project(s, p, easter, drive, configured)
+        s.commit()
+        assert (p.collection_id, p.folder("root").name) == (easter.id, "Song")
+        assert drive.path_of(root_id) == "Archive Root/Shared Archive/Easter/Song"
+        assert [f.name for f in drive.list_children(easter.drive_id)] == ["Song"]
+
+
+@pytest.mark.asyncio
+async def test_collection_folder_is_checked_before_it_is_used(db, settings, drive):
+    from mg_archive_bot.services import collections as collection_service
+    from mg_archive_bot.services.collections import ensure_collection_folder
+
+    with session_scope() as s:
+        # a folder somebody made by hand is re-used; a project's own folder never is
+        by_hand = drive.create_folder("Hand Made", drive.ROOT_ID)
+        hand = collection_service.create_collection(s, "Hand Made", 1)
+        assert await ensure_collection_folder(s, hand, drive, settings) is False and hand.drive_id == by_hand.id  # found, not made
+        project = project_service.create_draft(s, "Christmas", 1, "Lead", 2026)
+        await project_service.provision_folders(s, project, drive, settings)
+        s.commit()
+        christmas = collection_service.create_collection(s, "Christmas", 1)
+        with pytest.raises(ProjectError, match="A project at the top level is already called “Christmas”"):
+            await ensure_collection_folder(s, christmas, drive, settings)
+        assert christmas.drive_id is None
+        with pytest.raises(ProjectError, match="already called “Christmas”"):
+            await ensure_collection_folder(s, christmas, drive, settings, moving_root_id="some-other-folder")
+        assert await ensure_collection_folder(s, christmas, drive, settings, moving_root_id=project.drive_root_id) is True
+        made = christmas.drive_id
+        assert made not in (None, project.drive_root_id) and drive.path_of(made) == "Archive Root/Christmas"
+        s.commit()
+        # a folder that is fine is kept, and asked about exactly once
+        calls = []
+        real_get = drive.get_file
+        drive.get_file = lambda file_id: calls.append(file_id) or real_get(file_id)
+        assert await ensure_collection_folder(s, christmas, drive, settings) is False and christmas.drive_id == made
+        assert calls == [made]
+        drive.get_file = real_get
+        await project_service.move_project(s, project, christmas, drive, settings)
+        s.commit()
+        assert drive.path_of(project.drive_root_id) == "Archive Root/Christmas/Christmas"
+        # the name rule that the wizard and the move apply before anything is created
+        top = project_service.create_draft(s, "Standalone", 1, "Lead", 2026)
+        assert collection_service.taken_by_top_level_project(s, "standalone") is False  # a draft has no folder yet
+        await project_service.provision_folders(s, top, drive, settings)
+        s.commit()
+        assert collection_service.taken_by_top_level_project(s, " STANDALONE ") is True
+        assert collection_service.taken_by_top_level_project(s, "Standalone", except_project_id=top.id) is False
+        assert collection_service.taken_by_top_level_project(s, "Christmas") is False  # that project is inside a collection now
+
+
+@pytest.mark.asyncio
+async def test_a_new_collection_is_stored_only_after_the_move(db, settings, drive):
+    from mg_archive_bot.models import Collection
+    from mg_archive_bot.services import collections as collection_service
+    from mg_archive_bot.services.drive import DriveError
+
+    with session_scope() as s:
+        p = project_service.create_draft(s, "Song", 1, "Lead", 2026)
+        await project_service.provision_folders(s, p, drive, settings)
+        other = project_service.create_draft(s, "Taken", 1, "Lead", 2026)
+        await project_service.provision_folders(s, other, drive, settings)
+        s.commit()
+        root_id = p.drive_root_id
+
+        def folders_at_root() -> list[str]:
+            return sorted(f.name for f in drive.list_children(drive.ROOT_ID) if f.is_folder)
+
+        # refused by name: nothing is created anywhere
+        with pytest.raises(ProjectError, match="already called “Taken”"):
+            await project_service.move_project(s, p, Collection(name="Taken", created_by=1), drive, settings)
+        s.rollback()
+        assert collection_service.list_collections(s) == [] and folders_at_root() == ["Song", "Taken"]
+
+        # Google Drive fails: the folder that was made for this move is removed again, no collection is stored
+        real_move = drive.move
+        seen_during_move: list[list[str]] = []
+
+        def failing(*args, **kwargs):
+            with session_scope() as other_session:  # what everybody else sees while the move is in flight
+                seen_during_move.append([c.name for c in collection_service.list_collections(other_session)])
+            raise DriveError("Google Drive error 500")
+
+        drive.move = failing
+        with pytest.raises(DriveError):
+            await project_service.move_project(s, p, Collection(name="Easter", created_by=1), drive, settings)
+        s.rollback()
+        assert seen_during_move == [[]] and collection_service.list_collections(s) == []
+        assert folders_at_root() == ["Song", "Taken"] and drive.path_of(root_id) == "Archive Root/Song"
+        # ... but a folder somebody made by hand is only borrowed, never thrown away
+        by_hand = drive.create_folder("Easter", drive.ROOT_ID)
+        with pytest.raises(DriveError):
+            await project_service.move_project(s, p, Collection(name="Easter", created_by=1), drive, settings)
+        s.rollback()
+        assert drive.get_file(by_hand.id).trashed is False and folders_at_root() == ["Easter", "Song", "Taken"]
+        drive.move = real_move
+
+        # success: stored now, with the folder it was given
+        await project_service.move_project(s, p, Collection(name="Easter", created_by=1), drive, settings)
+        s.commit()
+        stored = collection_service.find_by_name(s, "easter")
+        assert stored is not None and stored.id is not None and stored.drive_id == by_hand.id and stored.created_by == 1
+        assert (p.collection_id, p.collection, p.full_name) == (stored.id, "Easter", "Easter / Song")
+        assert drive.path_of(root_id) == "Archive Root/Easter/Song"
+
+        # a wizard stored the same name while the move was in flight: that record is used, not a second one
+        def racing(*args, **kwargs):
+            with session_scope() as other_session:
+                collection_service.create_collection(other_session, "Pentecost", 2)
+            return real_move(*args, **kwargs)
+
+        drive.move = racing
+        await project_service.move_project(s, other, Collection(name="pentecost", created_by=1), drive, settings)
+        s.commit()
+        drive.move = real_move
+        names = [c.name for c in collection_service.list_collections(s)]
+        assert names == ["Easter", "Pentecost"]
+        pentecost = collection_service.find_by_name(s, "Pentecost")
+        assert other.collection_id == pentecost.id and pentecost.created_by == 2 and pentecost.drive_id is not None
+        assert drive.path_of(other.drive_root_id) == "Archive Root/pentecost/Taken"
+
+
+@pytest.mark.asyncio
+async def test_collections_recorded_by_earlier_versions_keep_working(db, settings, drive):
+    """Earlier versions re-used a top-level project's folder for a collection of the same name."""
+    from mg_archive_bot.services import collections as collection_service
+    from mg_archive_bot.services.collections import ensure_collection_folder
+
+    with session_scope() as s:
+        owner = project_service.create_draft(s, "BF", 1, "Lead", 2026)
+        await project_service.provision_folders(s, owner, drive, settings)
+        # the state an earlier version left behind: the collection "BF" recorded the folder of the project "BF"
+        # when its first sub-project was created, and that sub-project lives inside it
+        bf = collection_service.create_collection(s, "BF", 1)
+        first = project_service.create_draft(s, "Teaser", 1, "Lead", 2026)
+        await project_service.provision_folders(s, first, drive, settings)
+        drive.move(first.drive_root_id, owner.drive_root_id)
+        bf.drive_id = owner.drive_root_id
+        first.collection_folder, first.collection = bf, "BF"
+        s.commit()
+        assert drive.path_of(first.drive_root_id) == "Archive Root/BF/Teaser" and first.full_name == "BF / Teaser"
+
+        member = project_service.create_draft(s, "Opening", 1, "Lead", 2026, bf)
+        await project_service.provision_folders(s, member, drive, settings)  # the wizard still works
+        s.commit()
+        assert drive.path_of(member.drive_root_id) == "Archive Root/BF/Opening" and bf.drive_id == owner.drive_root_id
+        song = project_service.create_draft(s, "Song", 1, "Lead", 2026)
+        await project_service.provision_folders(s, song, drive, settings)
+        s.commit()
+        await project_service.move_project(s, song, bf, drive, settings)  # and so does a move into it
+        s.commit()
+        assert drive.path_of(song.drive_root_id) == "Archive Root/BF/Song" and bf.drive_id == owner.drive_root_id
+        # the project that owns the folder cannot go into itself, and is told why
+        with pytest.raises(ProjectError, match="uses this project's own Google Drive folder, and 3 project"):
+            await project_service.move_project(s, owner, bf, drive, settings)
+        s.rollback()
+        # once the collection is empty it gets a folder of its own
+        for p in (first, member, song):
+            await project_service.move_project(s, p, None, drive, settings)
+            s.commit()
+        with pytest.raises(ProjectError, match="already called “BF”"):
+            await ensure_collection_folder(s, bf, drive, settings)  # the owner still has the name
+        s.rollback()
+        await project_service.rename_project(s, owner, "BF Main", drive, settings)
+        s.commit()
+        assert await ensure_collection_folder(s, bf, drive, settings) is True
+        s.commit()
+        assert bf.drive_id != owner.drive_root_id and drive.path_of(bf.drive_id) == "Archive Root/BF"
+        assert drive.path_of(owner.drive_root_id) == "Archive Root/BF Main"
+
+
+@pytest.mark.asyncio
+async def test_collection_with_only_cancelled_projects_can_be_used_again(db, settings, drive):
+    from mg_archive_bot.services import collections as collection_service
+
+    with session_scope() as s:
+        bf = collection_service.create_collection(s, "BF 2025", 1)
+        teaser = project_service.create_draft(s, "Teaser", 1, "Lead", 2026, bf)
+        await project_service.provision_folders(s, teaser, drive, settings)
+        song = project_service.create_draft(s, "Song", 1, "Lead", 2026)
+        await project_service.provision_folders(s, song, drive, settings)
+        s.commit()
+        old_folder = bf.drive_id
+        await project_service.revoke_project(s, teaser, drive, 1)
+        s.commit()
+        # the collection folder went to the trash too; the cancelled project could still be restored: refused
+        drive.delete(old_folder)
+        with pytest.raises(ProjectError, match="is in the trash, and 1 project"):
+            await project_service.move_project(s, song, bf, drive, settings)
+        s.rollback()
+        # the trash was emptied: nothing of the cancelled project is left, the collection starts again
+        for gone in [n for n in list(drive._nodes) if n == old_folder or drive.path_of(n).startswith("Archive Root/BF 2025/")]:
+            del drive._nodes[gone]
+        await project_service.move_project(s, song, bf, drive, settings)
+        s.commit()
+        assert bf.drive_id != old_folder and drive.path_of(song.drive_root_id) == "Archive Root/BF 2025/Song"
+        # an active project whose folder is missing still blocks the replacement
+        del drive._nodes[bf.drive_id]
+        other = project_service.create_draft(s, "Other", 1, "Lead", 2026)
+        await project_service.provision_folders(s, other, drive, settings)
+        s.commit()
+        with pytest.raises(ProjectError, match="cannot be found .* and 1 project"):
+            await project_service.move_project(s, other, bf, drive, settings)
+
+
+@pytest.mark.asyncio
+async def test_names_are_compared_without_case_in_every_alphabet(db, settings, drive):
+    from sqlalchemy import text
+
+    from mg_archive_bot.models import Collection
+    from mg_archive_bot.services import collections as collection_service
+
+    with session_scope() as s:
+        assert s.execute(text("select lower('ÄRZTE NOËL Ωmega ABC 复活节'), lower(NULL), lower(42)")).one() == ("ärzte noël ωmega abc 复活节", None, 42)
+        stored = collection_service.create_collection(s, "Ärzte", 1)
+        s.commit()
+        for spelling in ("Ärzte", "ärzte", "ÄRZTE", "  ärzte "):
+            assert collection_service.find_by_name(s, spelling) is stored, spelling
+        assert collection_service.create_collection(s, "ÄRZTE", 1) is stored  # re-used, not doubled
+        p = project_service.create_draft(s, "Élan", 1, "Lead", 2026)
+        await project_service.provision_folders(s, p, drive, settings)
+        s.commit()
+        assert project_service.name_in_use(s, "ÉLAN") and project_service.name_in_use(s, "élan")
+        assert collection_service.taken_by_top_level_project(s, "élan") is True
+        with pytest.raises(ProjectError, match="already exists"):
+            project_service.create_draft(s, "ÉLAN", 2, "Other", 2026)
+        # typing an existing name for a move, in any spelling, leads to that collection
+        song = project_service.create_draft(s, "Song", 1, "Lead", 2026)
+        await project_service.provision_folders(s, song, drive, settings)
+        s.commit()
+        for spelling in ("Ärzte", "ÄRZTE"):
+            target = collection_service.find_by_name(s, spelling) or Collection(name=spelling, created_by=1)
+            assert target is stored
+        await project_service.move_project(s, song, stored, drive, settings)
+        s.commit()
+        assert [c.name for c in collection_service.list_collections(s)] == ["Ärzte"]
+        assert drive.path_of(song.drive_root_id) == "Archive Root/Ärzte/Song"

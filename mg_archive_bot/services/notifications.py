@@ -136,6 +136,18 @@ def renamed_message(old_name: str, project: Project) -> str:
     return f"✏️ <b>{esc(old_name)}</b> is now <b>{esc(project.full_name)}</b>. The Google Drive folder was renamed too; existing links keep working."
 
 
+def moved_message(old_collection: str | None, project: Project) -> str:
+    """Group notice after a project was put into, taken out of, or moved between collections."""
+    new_collection = project.collection_folder.name if project.collection_folder is not None else None
+    if new_collection is None:
+        what = f"<b>{esc(project.name)}</b> was taken out of the collection <b>{esc(old_collection or '')}</b>"
+    elif old_collection is None:
+        what = f"<b>{esc(project.name)}</b> is now part of the collection <b>{esc(new_collection)}</b>"
+    else:
+        what = f"<b>{esc(project.name)}</b> moved from <b>{esc(old_collection)}</b> to the collection <b>{esc(new_collection)}</b>"
+    return f"📂 {what}. The Google Drive folder was moved with it; existing links keep working."
+
+
 def reopened_message(project: Project) -> str:
     return f"🟢 <b>{esc(project.full_name)}</b> has been reopened for further uploads."
 

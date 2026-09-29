@@ -172,6 +172,15 @@ example somebody was assigned to Titlebars), an older version cannot read those 
 * **Collections** group sub-projects in one folder: `BF/Opening/…`, `BF/Worship/…`. Each sub-project keeps its own
   declarations, tracking, previews and verification; its Collection metadata is set automatically, so `/search bf`
   finds all of them. A collection folder that already exists under the root is re-used.
+  A project can change its place later: project menu → **📂 Collection** → take it out of its collection (top level),
+  put it into another collection, or into a new one. The project's Google Drive folder is moved with it (folder
+  links keep working and nothing inside changes), the index sheet and the live status message follow, and the MG
+  Group is told. Project names stay unique inside the place a project arrives in. A collection that becomes empty
+  is kept, together with its folder, and can be used again (if its empty folder was deleted in Google Drive, a new
+  one is made). A new collection can be named after the project you are moving into it, but not after another
+  project that sits at the top level: a collection is never given a project's Drive folder. A collection you type
+  under **New collection…** only comes into being when the move has worked, so a typo or a Drive problem leaves
+  nothing behind.
 * **Project lead**: every project has exactly one lead, who must hold the Team Lead role (never the Super Admin). A
   Team Lead who creates a project is its lead; when the Super Admin creates one, the wizard asks who leads it. Only the
   lead and the Super Admin can change a project (assign, metadata, group, previews, verify, revoke…); other Team Leads
@@ -180,7 +189,8 @@ example somebody was assigned to Titlebars), an older version cannot read those 
   is set (the Super Admin is told which ones).
 * `/projects` → project menu: **Check progress**, **Announce**, **Remind**, **Assign designers** (per folder group),
   **Files** (folder-by-folder listing with names and sizes), **Edit metadata**, **Rename** (renames the Drive folder
-  too; links keep working, the group is told), **Declared assets**, **MG group**,
+  too; links keep working, the group is told), **Declared assets**, **MG group**, **Collection** (move the project
+  into or out of a collection),
   **Generate previews**, **Previews**, **Verify & archive**, **Reopen**, **Revoke project**, **Open in Google Drive**.
 * **Revoke project** (for a project that will not go ahead): after a confirmation, its Drive folder is moved to the
   trash, tracking and reminders stop, it disappears from search, its row is removed from the index sheet (rows below

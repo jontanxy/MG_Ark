@@ -332,6 +332,76 @@ async def rename_project(session: Session, project: Project, new_name: str, driv
     return old, cleaned
 
 
+async def move_project(session: Session, project: Project, target: Collection | None, drive: DriveClient, settings: Settings) -> str:
+    """Put a project into a collection, or take it out of one (*target* ``None`` = top level of the archive).
+
+    *target* may be a NEW collection that is not stored yet (``target.id is None``): it is stored only after the
+    Drive folder has been moved into it, so a move that does not happen leaves no collection behind.
+
+    Returns the project's previous display name. The Drive folder is moved first and the database follows, so
+    when Drive fails the bot's records are unchanged; folder ids do not change, so every link keeps working.
+    Callers hold the placement lock: the name check and the move must not interleave with another move, rename
+    or creation.
+    """
+    from .collections import ensure_collection_folder, find_by_name, name_taken_message, taken_by_top_level_project
+
+    if project.status in (ProjectStatus.DRAFT, ProjectStatus.CANCELLED):
+        raise ProjectError("Drafts and cancelled projects cannot be moved.")
+    new_collection = target is not None and target.id is None
+    target_id = target.id if target is not None else None
+    if new_collection:
+        if taken_by_top_level_project(session, target.name, except_project_id=project.id):
+            raise ProjectError(name_taken_message(target.name))
+    else:
+        if project.collection_id == target_id:
+            raise ProjectError(f"It is already in “{target.name}”." if target is not None else "It is not in a collection.")
+        if name_in_use(session, project.name, exclude_id=project.id, collection_id=target_id):
+            where = f"in “{target.name}”" if target is not None else "at the top level"
+            raise ProjectError(f"A project named “{project.name}” already exists {where}. Rename one of them first.")
+    old_display = project.full_name
+    if project.drive_root_id:
+        folder_created = False
+        if target is not None:
+            folder_created = await ensure_collection_folder(session, target, drive, settings, moving_root_id=project.drive_root_id)
+            session.commit()  # the folder of a stored collection is real now; never hold its write open across the move
+            parent = target.drive_id
+        else:
+            parent = settings.drive_root_folder_id or getattr(drive, "ROOT_ID", "root")
+        root_id, name = project.drive_root_id, project.name
+
+        def _move_folder() -> str:
+            try:
+                taken = drive.find_child_folder(name, parent)
+                folder_name = name if taken is None or taken.id == root_id else _unique_root_name(drive, name, parent)
+                drive.move(root_id, parent, folder_name)
+            except (DriveError, ProjectError):
+                if new_collection and folder_created:  # made for this move only: do not leave it lying around
+                    try:
+                        if not drive.list_children(parent):
+                            drive.delete(parent)
+                    except DriveError as exc:
+                        log.warning("Could not remove the unused collection folder %s: %s", parent, exc)
+                raise
+            return folder_name
+
+        folder_name = await asyncio.to_thread(_move_folder)
+        root_row = project.folder("root")
+        if root_row is not None:
+            root_row.name = folder_name
+    if new_collection:
+        stored = find_by_name(session, target.name)  # a wizard may have stored that name in the meantime
+        if stored is not None:
+            if not stored.drive_id:
+                stored.drive_id, stored.link = target.drive_id, target.link
+            target = stored
+    project.collection_folder = target  # a new collection is stored through this link
+    session.flush()
+    project.collection_id = target.id if target is not None else None
+    project.collection = target.name if target is not None else ""  # the label follows the folder
+    session.flush()
+    return old_display
+
+
 def _unique_root_name(drive: DriveClient, name: str, parent_id: str) -> str:
     candidate = name
     for n in range(2, 50):
@@ -359,12 +429,16 @@ async def provision_folders(session: Session, project: Project, drive: DriveClie
     if not settings.drive_root_folder_id and settings.google_auth_mode != "fake":
         raise ProjectError("DRIVE_ROOT_FOLDER_ID is not configured.")
     root_parent = settings.drive_root_folder_id or getattr(drive, "ROOT_ID", "root")
+    if name_in_use(session, project.name, exclude_id=project.id, collection_id=project.collection_id):
+        # Drafts do not reserve their name: another project may have taken it while this one was being set up.
+        where = f" in “{project.collection_folder.name}”" if project.collection_folder is not None else ""
+        raise ProjectError(f"A project named “{project.name}” now exists{where}. Cancel and start again with another name.")
     if project.collection_folder is not None:
         from .collections import ensure_collection_folder  # local import: collections depends on projects
 
-        collection = await ensure_collection_folder(session, project.collection_folder, drive, settings)
+        await ensure_collection_folder(session, project.collection_folder, drive, settings)
         session.commit()  # the collection folder is real now; never hold its write open across the tree build
-        root_parent = collection.drive_id
+        root_parent = project.collection_folder.drive_id
     tree = build_folder_tree(settings.folder_names())
     flags = {spec.key: (spec.create_when is None or project.flag(spec.create_when)) for spec in tree}
     project_name = project.name

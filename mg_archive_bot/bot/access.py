@@ -68,6 +68,16 @@ def project_lock(context: ContextTypes.DEFAULT_TYPE, project_id: int) -> asyncio
     return locks.setdefault(project_id, asyncio.Lock())
 
 
+def placement_lock(context: ContextTypes.DEFAULT_TYPE) -> asyncio.Lock:
+    """One archive-wide lock for whatever decides a project's name or place (create, rename, move), so that the
+    check "is this name free there?" and the change itself never interleave with another one.
+    Always taken INSIDE the project lock, never the other way round."""
+    lock = context.bot_data.get("placement_lock")
+    if lock is None:
+        lock = context.bot_data["placement_lock"] = asyncio.Lock()
+    return lock
+
+
 def limiter(context: ContextTypes.DEFAULT_TYPE, name: str, limit: int, window_seconds: float) -> SlidingWindow:
     limiters: dict[str, SlidingWindow] = context.bot_data.setdefault("limiters", {})
     if name not in limiters:

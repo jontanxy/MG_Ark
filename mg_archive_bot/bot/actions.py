@@ -303,11 +303,12 @@ async def project_file_listing(context: ContextTypes.DEFAULT_TYPE, project: Proj
     cooldown window, bounded in folders/files/messages, and run on a dedicated small thread pool.
     """
     settings = settings_of(context)
-    cache: dict[int, tuple[float, list[str]]] = context.bot_data.setdefault("file_listings", {})
+    cache: dict[int, tuple[float, list[str], str]] = context.bot_data.setdefault("file_listings", {})
+    title = project.full_name
 
     def cached() -> list[str] | None:
-        hit = cache.get(project.id)
-        return hit[1] if hit and time.monotonic() - hit[0] < settings.status_cooldown_seconds else None
+        hit = cache.get(project.id)  # an entry made under another name (before a rename or a move) is not used
+        return hit[1] if hit and hit[2] == title and time.monotonic() - hit[0] < settings.status_cooldown_seconds else None
 
     if (chunks := cached()) is not None:
         return chunks
@@ -324,8 +325,8 @@ async def project_file_listing(context: ContextTypes.DEFAULT_TYPE, project: Proj
         )
         if root.error:
             return [f"⚠️ Could not read Google Drive for <b>{esc(project.full_name)}</b>: {esc(root.error[:200])}"]
-        chunks = render_listing(project.full_name, root, max_chunks=settings.files_max_chunks)
-        cache[project.id] = (time.monotonic(), chunks)
+        chunks = render_listing(title, root, max_chunks=settings.files_max_chunks)
+        cache[project.id] = (time.monotonic(), chunks, title)
         return chunks
 
 

@@ -1722,3 +1722,869 @@ async def test_project_with_the_earlier_titlebars_layout_follows_the_new_one(har
     await harness.press(LEAD, f"pj:{pid}:reopen")
     await harness.press(LEAD, f"pj:{pid}:check")
     assert titlebars_state()[0] == ["titlebars"] and removals() == []
+
+
+@pytest.mark.asyncio
+async def test_project_can_be_moved_in_and_out_of_collections(harness, authorised_group, drive):
+    from mg_archive_bot.bot.actions import flush_sheet_syncs
+    from mg_archive_bot.services import collections as collection_service
+    from mg_archive_bot.services import search as search_service
+    from mg_archive_bot.services import tracking
+    from mg_archive_bot.services.drive import DriveError
+
+    bot = harness.bot
+    ctx = harness.ctx(LEAD)
+    other = FakeUser(2002, "Olga", "Other", username="olga")
+    with session_scope() as s:
+        user_service.register_designer(s, other.id, other.full_name, other.username)
+        user_service.set_role(s, other.id, Role.TEAM_LEAD, SUPER_ADMIN_ID)
+    await run_wizard(harness, name="God I'm Just Thankful", collection="Building Fund 2026")
+    await run_wizard(harness, name="Opening", collection="Building Fund 2026")
+    await run_wizard(harness, name="Opening")
+    with session_scope() as s:
+        projects = {p.full_name: p for p in project_service.list_projects(s)}
+        assert set(projects) == {"Building Fund 2026 / God I'm Just Thankful", "Building Fund 2026 / Opening", "Opening"}
+        song = projects["Building Fund 2026 / God I'm Just Thankful"]
+        pid, root_id, folders = song.id, song.drive_root_id, {f.key: (f.drive_id, f.link) for f in song.folders}
+        top_opening = projects["Opening"].id
+        bf_id = song.collection_id
+    await flush_sheet_syncs(ctx)
+    sheet_id = next(iter(harness.sheets.books))
+
+    def sheet_rows() -> dict[str, list[str]]:
+        return {r[0]: r for r in harness.sheets.get_values(sheet_id, f"'Projects'!A:{tracking.LAST_COL}")[1:]}
+
+    def found(term: str) -> set[str]:
+        with session_scope() as s:
+            return {hit.project.full_name for hit in search_service.search_projects(s, term)}
+
+    await flush_sheet_syncs(ctx)
+    assert sheet_rows()[str(pid)][1:3] == ["Building Fund 2026", "God I'm Just Thankful"]
+    assert found("building fund") == {"Building Fund 2026 / God I'm Just Thankful", "Building Fund 2026 / Opening"}
+
+    # the option is in the lead's menu only
+    q = await harness.press(LEAD, f"pj:{pid}:menu")
+    assert ("📂 Collection", f"pj:{pid}:col") in harness.buttons(q.edits[-1]["reply_markup"])
+    q = await harness.press(other, f"pj:{pid}:menu")
+    assert not any(d == f"pj:{pid}:col" for _, d in harness.buttons(q.edits[-1]["reply_markup"]))
+    for stranger, data in ((other, "col"), (other, "setcol:none"), (DESIGNER, "col"), (DESIGNER, "setcol:none")):
+        q = await harness.press(stranger, f"pj:{pid}:{data}")
+        assert q.answers[-1][1] is True and ("project's lead" in q.answers[-1][0] or "Team Lead role" in q.answers[-1][0])
+    assert drive.path_of(root_id) == "Archive Root/Building Fund 2026/God I'm Just Thankful"
+
+    # 1. take it out of the collection
+    await harness.command(DESIGNER, "/status", chat=GROUP)  # creates the live status messages
+    q = await harness.press(LEAD, f"pj:{pid}:col")
+    assert "is in the collection <b>Building Fund 2026</b>" in q.edits[-1]["text"]
+    assert harness.buttons(q.edits[-1]["reply_markup"]) == [
+        ("📁 Top level (take it out of the collection)", f"pj:{pid}:setcol:none"),
+        ("➕ New collection…", f"pj:{pid}:setcol:new"),
+        ("◀️ Back to project", f"pj:{pid}:menu"),
+    ]
+    q = await harness.press(LEAD, f"pj:{pid}:setcol:none")
+    assert q.answers == [(None, False)]  # acknowledged at once; the outcome is shown in the message
+    assert _plain(q.edits[-1]["text"]).startswith("✅ God I'm Just Thankful was taken out of Building Fund 2026 and now sits at the top level.")
+    assert ("📂 Collection", f"pj:{pid}:col") in harness.buttons(q.edits[-1]["reply_markup"])
+    assert drive.path_of(root_id) == "Archive Root/God I'm Just Thankful"
+    assert drive.path_of(folders["timeline_prores"][0]) == "Archive Root/God I'm Just Thankful/Final Render/Timeline/ProRes 4444"
+    assert _plain(bot.last(GROUP.id)["text"]) == (
+        "📂 God I'm Just Thankful was taken out of the collection Building Fund 2026. "
+        "The Google Drive folder was moved with it; existing links keep working."
+    )
+    with session_scope() as s:
+        p = project_service.get_project(s, pid)
+        assert (p.collection_id, p.collection, p.full_name, p.drive_root_id) == (None, "", "God I'm Just Thankful", root_id)
+        assert {f.key: (f.drive_id, f.link) for f in p.folders} == folders  # the same folders, the same links
+        live = bot.messages[(GROUP.id, p.status_message_id)]["text"]
+        assert "<b>God I'm Just Thankful</b>" in live and "Building Fund 2026" not in live
+        collection = collection_service.get_collection(s, bf_id)
+        assert [f.name for f in drive.list_children(collection.drive_id)] == ["Opening"]  # the rest of the collection stays
+    await flush_sheet_syncs(ctx)
+    assert sheet_rows()[str(pid)][1:3] == ["", "God I'm Just Thankful"]
+    assert found("building fund") == {"Building Fund 2026 / Opening"} and found("thankful") == {"God I'm Just Thankful"}
+
+    # 2. put it back
+    q = await harness.press(LEAD, f"pj:{pid}:col")
+    assert "is at the top level (in no collection)" in q.edits[-1]["text"]
+    assert harness.buttons(q.edits[-1]["reply_markup"])[0] == ("📂 Building Fund 2026", f"pj:{pid}:setcol:{bf_id}")
+    assert not any(d == f"pj:{pid}:setcol:none" for _, d in harness.buttons(q.edits[-1]["reply_markup"]))
+    q = await harness.press(LEAD, f"pj:{pid}:setcol:none")
+    assert q.edits[-1]["text"].startswith("❌ It is not in a collection.\n\n📂 <b>God I'm Just Thankful</b> is at the top level")
+    assert harness.buttons(q.edits[-1]["reply_markup"])[0] == ("📂 Building Fund 2026", f"pj:{pid}:setcol:{bf_id}")  # choose again
+    q = await harness.press(LEAD, f"pj:{pid}:setcol:{bf_id}")
+    assert q.answers == [(None, False)] and "is now in <b>Building Fund 2026</b>" in q.edits[-1]["text"]
+    assert drive.path_of(root_id) == "Archive Root/Building Fund 2026/God I'm Just Thankful"
+    assert "is now part of the collection <b>Building Fund 2026</b>" in bot.last(GROUP.id)["text"]
+    with session_scope() as s:
+        p = project_service.get_project(s, pid)
+        assert (p.collection_id, p.collection, p.full_name) == (bf_id, "Building Fund 2026", "Building Fund 2026 / God I'm Just Thankful")
+        assert "Building Fund 2026 / God I'm Just Thankful" in bot.messages[(GROUP.id, p.status_message_id)]["text"]
+    await flush_sheet_syncs(ctx)
+    assert sheet_rows()[str(pid)][1] == "Building Fund 2026"
+    assert found("building fund") == {"Building Fund 2026 / God I'm Just Thankful", "Building Fund 2026 / Opening"}
+    notices = len(bot.texts(GROUP.id))
+    q = await harness.press(LEAD, f"pj:{pid}:setcol:{bf_id}")  # a second press: the project menu, not an error
+    assert q.edits[-1]["text"].startswith("ℹ️ <b>God I'm Just Thankful</b> is already in <b>Building Fund 2026</b>.\n\n")
+    assert ("📂 Collection", f"pj:{pid}:col") in harness.buttons(q.edits[-1]["reply_markup"]) and len(bot.texts(GROUP.id)) == notices
+    assert q.edits[0] == {"text": "⏳ Moving <b>God I'm Just Thankful</b> and its Google Drive folder…", "reply_markup": None}
+
+    # 3. a project name must stay unique where it arrives
+    q = await harness.press(LEAD, f"pj:{top_opening}:setcol:{bf_id}")
+    assert q.edits[-1]["text"].startswith("❌ A project named “Opening” already exists in “Building Fund 2026”. Rename one of them first.")
+    with session_scope() as s:
+        p = project_service.get_project(s, top_opening)
+        assert p.collection_id is None and drive.path_of(p.drive_root_id) == "Archive Root/Opening"
+
+    # 4. into a collection that does not exist yet
+    q = await harness.press(LEAD, f"pj:{pid}:setcol:new")
+    assert "Send the <b>collection name</b>" in bot.last(LEAD.id)["text"]
+    await harness.text(LEAD, "x")
+    assert "Collection name must be between 2 and 100" in bot.last(LEAD.id)["text"]
+    await harness.text(LEAD, "building FUND 2026")  # the collection it is in, spelled differently
+    assert "is already in Building Fund 2026" in _plain(bot.last(LEAD.id)["text"]) and "Send another collection name" in bot.last(LEAD.id)["text"]
+    await harness.text(LEAD, "  Thanksgiving   2026 ")
+    text = bot.last(LEAD.id)["text"]
+    assert "is now in <b>Thanksgiving 2026</b>" in text and "Thanksgiving 2026 / God I'm Just Thankful" in text
+    assert ("📂 Collection", f"pj:{pid}:col") in harness.buttons(bot.last_markup(LEAD.id))
+    assert drive.path_of(root_id) == "Archive Root/Thanksgiving 2026/God I'm Just Thankful"
+    assert "moved from <b>Building Fund 2026</b> to the collection <b>Thanksgiving 2026</b>" in bot.last(GROUP.id)["text"]
+    with session_scope() as s:
+        assert [c.name for c in collection_service.list_collections(s)] == ["Building Fund 2026", "Thanksgiving 2026"]
+        thanks_id = collection_service.find_by_name(s, "thanksgiving 2026").id
+    await harness.text(LEAD, "Another Collection")  # the prompt is closed: plain text is a search again
+    assert drive.path_of(root_id) == "Archive Root/Thanksgiving 2026/God I'm Just Thankful"
+    q = await harness.press(LEAD, f"pj:{pid}:col")
+    assert [t for t, _ in harness.buttons(q.edits[-1]["reply_markup"])][:2] == ["📁 Top level (take it out of the collection)", "📂 Building Fund 2026"]
+
+    # 5. Google Drive refuses: nothing changes
+    real_move = drive.move
+
+    def refuse(*args, **kwargs):
+        raise DriveError("Google Drive error 403 (permission denied or quota exceeded)")
+
+    drive.move = refuse  # type: ignore[method-assign]
+    group_messages = len(bot.texts(GROUP.id))
+    q = await harness.press(LEAD, f"pj:{pid}:setcol:{bf_id}")
+    assert q.edits[-1]["text"].startswith(
+        "❌ Google Drive did not confirm the move: Google Drive error 403 (permission denied or quota exceeded). "
+        "Nothing was changed in the bot; you can try again."
+    )
+    assert ("📂 Building Fund 2026", f"pj:{pid}:setcol:{bf_id}") in harness.buttons(q.edits[-1]["reply_markup"])
+    drive.move = real_move  # type: ignore[method-assign]
+    with session_scope() as s:
+        p = project_service.get_project(s, pid)
+        assert (p.collection_id, p.collection) == (thanks_id, "Thanksgiving 2026")
+    assert drive.path_of(root_id) == "Archive Root/Thanksgiving 2026/God I'm Just Thankful" and len(bot.texts(GROUP.id)) == group_messages
+
+    # 6. junk button data, a collection that is gone, a cancelled project
+    for data in ("setcol:abc", "setcol:", "setcol", "setcol:1e3", "setcol:" + "9" * 40):
+        q = await harness.press(LEAD, f"pj:{pid}:{data}")
+        assert q.answers == [("Invalid request.", True)] and q.edits == [], data
+    for data in ("setcol:99999", "setcol:-1", "setcol:0"):
+        q = await harness.press(LEAD, f"pj:{pid}:{data}")
+        assert q.edits[-1]["text"].startswith("❌ That collection no longer exists."), data
+    assert drive.path_of(root_id) == "Archive Root/Thanksgiving 2026/God I'm Just Thankful"
+    await harness.press(LEAD, f"pj:{pid}:revoke")
+    await harness.press(LEAD, f"pj:{pid}:revoke2")
+    for data in ("col", "setcol:none", f"setcol:{bf_id}", "setcol:new"):
+        q = await harness.press(LEAD, f"pj:{pid}:{data}")
+        assert q.answers[-1] == ("Restore the project before moving it.", True), data
+    with session_scope() as s:
+        assert project_service.get_project(s, pid).collection_id == thanks_id
+    # the Super Admin can move any project, an archived one included
+    with session_scope() as s:
+        p = project_service.get_project(s, top_opening)
+        p.status = ProjectStatus.ARCHIVED
+        s.commit()
+    q = await harness.press(ADMIN, f"pj:{top_opening}:setcol:{thanks_id}")
+    assert q.answers == [(None, False)] and q.edits[-1]["text"].startswith("✅ <b>Opening</b> is now in <b>Thanksgiving 2026</b>.")
+    with session_scope() as s:
+        p = project_service.get_project(s, top_opening)
+        assert p.full_name == "Thanksgiving 2026 / Opening" and drive.path_of(p.drive_root_id) == "Archive Root/Thanksgiving 2026/Opening"
+        assert p.status == ProjectStatus.ARCHIVED
+
+
+@pytest.mark.asyncio
+async def test_a_collection_never_shares_a_folder_with_a_project(harness, authorised_group, drive):
+    """A collection named like a top-level project must not take that project's folder as its own."""
+    from mg_archive_bot.services import collections as collection_service
+
+    bot = harness.bot
+    await run_wizard(harness, name="Easter 2026")
+    await run_wizard(harness, name="Opening")
+    with session_scope() as s:
+        roots = {p.name: p.drive_root_id for p in project_service.list_projects(s)}
+        ids = {p.name: p.id for p in project_service.list_projects(s)}
+
+    # another project has that name: refused, and no collection is left behind
+    await harness.press(LEAD, f"pj:{ids['Opening']}:setcol:new")
+    await harness.text(LEAD, "Easter 2026")
+    assert "A project at the top level is already called “Easter 2026”" in bot.last(LEAD.id)["text"]
+    assert "Send another collection name or /cancel." in bot.last(LEAD.id)["text"]
+    with session_scope() as s:
+        assert collection_service.list_collections(s) == []
+        assert project_service.get_project(s, ids["Opening"]).collection_id is None
+    # the wizard says so as soon as the name is sent, and creates nothing
+    await harness.command(LEAD, "/newproject")
+    await harness.press(LEAD, "nw:col:new")
+    await harness.text(LEAD, "easter 2026")
+    assert "A project at the top level is already called “easter 2026”" in bot.last(LEAD.id)["text"]
+    assert "Send another collection name or /cancel." in bot.last(LEAD.id)["text"]
+    with session_scope() as s:
+        assert collection_service.list_collections(s) == []
+    await harness.command(LEAD, "/cancel")
+    # upper or lower case makes no difference, although Google Drive would treat the folder names as different
+    await harness.press(LEAD, f"pj:{ids['Opening']}:setcol:new")
+    await harness.text(LEAD, "EASTER 2026")
+    assert "A project at the top level is already called “EASTER 2026”" in bot.last(LEAD.id)["text"]
+    with session_scope() as s:
+        assert collection_service.list_collections(s) == []
+    assert sorted(f.name for f in drive.list_children(drive.ROOT_ID) if f.is_folder) == ["Easter 2026", "Opening"]
+    assert drive.path_of(roots["Opening"]) == "Archive Root/Opening" and drive.path_of(roots["Easter 2026"]) == "Archive Root/Easter 2026"
+    await harness.text(LEAD, "Series")  # the prompt is still open: another name works
+    assert drive.path_of(roots["Opening"]) == "Archive Root/Series/Opening"
+
+    # the project's own name: the project becomes the first member of a collection of that name
+    await harness.press(LEAD, f"pj:{ids['Easter 2026']}:setcol:new")
+    await harness.text(LEAD, "easter 2026")
+    assert "is now in <b>easter 2026</b>" in bot.last(LEAD.id)["text"]
+    with session_scope() as s:
+        collection = collection_service.find_by_name(s, "Easter 2026")
+        assert collection.drive_id != roots["Easter 2026"] and drive.path_of(collection.drive_id) == "Archive Root/easter 2026"
+        assert project_service.get_project(s, ids["Easter 2026"]).full_name == "easter 2026 / Easter 2026"
+        collection_id = collection.id
+    assert drive.path_of(roots["Easter 2026"]) == "Archive Root/easter 2026/Easter 2026"
+    assert sorted(f.name for f in drive.list_children(drive.ROOT_ID) if f.is_folder) == ["Series", "easter 2026"]
+
+    # taking it out again puts a folder "Easter 2026" next to the collection folder; the collection keeps its own
+    q = await harness.press(LEAD, f"pj:{ids['Easter 2026']}:setcol:none")
+    assert q.edits[-1]["text"].startswith("✅")
+    assert drive.path_of(roots["Easter 2026"]) == "Archive Root/Easter 2026"
+    q = await harness.press(LEAD, f"pj:{ids['Opening']}:setcol:{collection_id}")
+    assert q.edits[-1]["text"].startswith("✅") and drive.path_of(roots["Opening"]) == "Archive Root/easter 2026/Opening"
+
+    # the wizard follows the same rule
+    await harness.command(LEAD, "/newproject")
+    await harness.press(LEAD, "nw:col:new")
+    await harness.text(LEAD, "Easter 2026 ")  # the existing collection, whatever the spelling
+    await harness.text(LEAD, "Worship")
+    await harness.press(LEAD, "nw:decl:done")
+    await harness.press(LEAD, f"nw:grp:{GROUP.id}")
+    await harness.press(LEAD, "nw:meta:skip")
+    await harness.press(LEAD, "nw:asg:done")
+    q = await harness.press(LEAD, "nw:confirm")
+    assert "Archive created" in q.edits[-1]["text"]
+    with session_scope() as s:
+        worship = [p for p in project_service.list_projects(s) if p.name == "Worship"][0]
+        assert drive.path_of(worship.drive_root_id) == "Archive Root/easter 2026/Worship"
+
+    # a record without members that points at a project's folder (written by an older version) gets its own folder
+    with session_scope() as s:
+        bad = collection_service.create_collection(s, "Broken", LEAD.id)
+        bad.drive_id = roots["Easter 2026"]
+        s.commit()
+        bad_id = bad.id
+    q = await harness.press(LEAD, f"pj:{ids['Opening']}:setcol:{bad_id}")
+    assert q.edits[-1]["text"].startswith("✅ <b>Opening</b> is now in <b>Broken</b>.")
+    with session_scope() as s:
+        repaired = collection_service.get_collection(s, bad_id)
+        assert repaired.drive_id != roots["Easter 2026"] and drive.path_of(repaired.drive_id) == "Archive Root/Broken"
+    assert drive.path_of(roots["Opening"]) == "Archive Root/Broken/Opening"
+    assert [f.name for f in drive.list_children(roots["Easter 2026"])] == ["Working File", "Final Render", "_Previews"]
+
+
+@pytest.mark.asyncio
+async def test_move_checks_the_collection_folder_first(harness, authorised_group, drive):
+    from mg_archive_bot.services import collections as collection_service
+
+    await run_wizard(harness, name="Song", collection="Building Fund 2026")
+    await run_wizard(harness, name="Opening", collection="Building Fund 2026")
+    with session_scope() as s:
+        projects = {p.name: p for p in project_service.list_projects(s)}
+        song, song_root, opening_root = projects["Song"].id, projects["Song"].drive_root_id, projects["Opening"].drive_root_id
+        bf = projects["Song"].collection_id
+        bf_folder = collection_service.get_collection(s, bf).drive_id
+    q = await harness.press(LEAD, f"pj:{song}:setcol:none")
+    assert q.edits[-1]["text"].startswith("✅")
+
+    # the folder is in the trash while a project still lives in it: refused, nothing moves
+    drive.delete(bf_folder)
+    q = await harness.press(LEAD, f"pj:{song}:setcol:{bf}")
+    assert q.edits[-1]["text"].startswith(
+        "❌ The Google Drive folder of the collection “Building Fund 2026” is in the trash, and 1 project(s) still belong to it. "
+        "Put the folder back in Google Drive first."
+    )
+    assert drive.path_of(song_root) == "Archive Root/Song" and not [c for c in drive.calls if c[0] == "move" and c[1][1] == bf_folder]
+    drive.restore(bf_folder)
+    q = await harness.press(LEAD, f"pj:{song}:setcol:{bf}")
+    assert q.edits[-1]["text"].startswith("✅") and drive.path_of(song_root) == "Archive Root/Building Fund 2026/Song"
+
+    # an emptied collection whose folder was thrown away gets a new folder when it is used again
+    opening = projects["Opening"].id
+    for pid in (song, opening):
+        q = await harness.press(LEAD, f"pj:{pid}:setcol:none")
+        assert q.edits[-1]["text"].startswith("✅")
+    drive.delete(bf_folder)
+    q = await harness.press(LEAD, f"pj:{song}:setcol:{bf}")
+    assert q.edits[-1]["text"].startswith("✅ <b>Song</b> is now in <b>Building Fund 2026</b>.")
+    with session_scope() as s:
+        new_folder = collection_service.get_collection(s, bf).drive_id
+    assert new_folder != bf_folder and drive.path_of(song_root) == "Archive Root/Building Fund 2026/Song"
+    assert drive.get_file(song_root).trashed is False and drive.get_file(song_root).parents == (new_folder,)
+    assert drive.path_of(opening_root) == "Archive Root/Opening"
+    # the same when the folder has disappeared altogether
+    await harness.press(LEAD, f"pj:{song}:setcol:none")
+    del drive._nodes[new_folder]
+    q = await harness.press(LEAD, f"pj:{opening}:setcol:{bf}")
+    assert q.edits[-1]["text"].startswith("✅") and drive.path_of(opening_root) == "Archive Root/Building Fund 2026/Opening"
+
+
+@pytest.mark.asyncio
+async def test_names_stay_unique_when_projects_move_at_the_same_moment(harness, authorised_group, drive):
+    import asyncio
+
+    from mg_archive_bot.services import collections as collection_service
+
+    other = FakeUser(2002, "Olga", "Other", username="olga")
+    with session_scope() as s:
+        user_service.register_designer(s, other.id, other.full_name, other.username)
+        user_service.set_role(s, other.id, Role.TEAM_LEAD, SUPER_ADMIN_ID)
+        target = collection_service.create_collection(s, "Target", LEAD.id)
+        s.commit()
+        target_id = target.id
+    await run_wizard(harness, name="Opening")
+    await run_wizard(harness, name="Opening", collection="Easter")
+    await run_wizard(harness, name="Alpha")
+    await run_wizard(harness, name="Beta")
+    with session_scope() as s:
+        by_name = {p.full_name: p.id for p in project_service.list_projects(s)}
+    real_move, real_list = drive.move, drive.list_children
+
+    def slow_move(*args, **kwargs):
+        import time
+
+        time.sleep(0.05)
+        return real_move(*args, **kwargs)
+
+    def slow_list(*args, **kwargs):
+        import time
+
+        time.sleep(0.02)
+        return real_list(*args, **kwargs)
+
+    drive.move, drive.list_children = slow_move, slow_list  # type: ignore[method-assign]
+    # two projects with the same name head for the same collection: exactly one gets in
+    first, second = await asyncio.gather(
+        harness.press(LEAD, f"pj:{by_name['Opening']}:setcol:{target_id}"),
+        harness.press(ADMIN, f"pj:{by_name['Easter / Opening']}:setcol:{target_id}"),
+    )
+    outcomes = sorted(q.edits[-1]["text"][:1] for q in (first, second))
+    assert outcomes == ["✅", "❌"]
+    refused = [q for q in (first, second) if q.edits[-1]["text"].startswith("❌")][0]
+    assert "already exists in “Target”" in refused.edits[-1]["text"]
+    with session_scope() as s:
+        in_target = [p for p in project_service.list_projects(s) if p.collection_id == target_id]
+        assert [p.name for p in in_target] == ["Opening"]
+        folder = collection_service.get_collection(s, target_id).drive_id
+    assert [f.name for f in drive.list_children(folder)] == ["Opening"]
+
+    # two different projects head for a collection that has no folder yet: one folder, both inside
+    with session_scope() as s:
+        fresh = collection_service.create_collection(s, "Fresh", LEAD.id)
+        s.commit()
+        fresh_id = fresh.id
+    first, second = await asyncio.gather(
+        harness.press(LEAD, f"pj:{by_name['Alpha']}:setcol:{fresh_id}"),
+        harness.press(ADMIN, f"pj:{by_name['Beta']}:setcol:{fresh_id}"),
+    )
+    assert first.edits[-1]["text"].startswith("✅") and second.edits[-1]["text"].startswith("✅")
+    drive.move, drive.list_children = real_move, real_list  # type: ignore[method-assign]
+    assert [f.name for f in drive.list_children(drive.ROOT_ID) if f.is_folder].count("Fresh") == 1
+    with session_scope() as s:
+        folder = collection_service.get_collection(s, fresh_id).drive_id
+    assert sorted(f.name for f in drive.list_children(folder)) == ["Alpha", "Beta"]
+
+    # a name taken while a draft was waiting in the wizard is noticed when the archive is created
+    await harness.command(other, "/newproject")
+    await harness.press(other, f"nw:col:{fresh_id}")
+    await harness.text(other, "Gamma")
+    await harness.press(other, "nw:decl:done")
+    await harness.press(other, f"nw:grp:{GROUP.id}")
+    await harness.press(other, "nw:meta:skip")
+    await harness.press(other, "nw:asg:done")
+    await run_wizard(harness, name="Gamma")
+    with session_scope() as s:
+        gamma = [p for p in project_service.list_projects(s) if p.name == "Gamma"][0].id
+    q = await harness.press(LEAD, f"pj:{gamma}:setcol:{fresh_id}")
+    assert q.edits[-1]["text"].startswith("✅")
+    q = await harness.press(other, "nw:confirm")
+    assert "A project named “Gamma” now exists in “Fresh”" in q.edits[-1]["text"]
+    with session_scope() as s:
+        created = [p for p in project_service.list_projects(s) if p.collection_id == fresh_id and p.status != ProjectStatus.DRAFT]
+        assert sorted(p.name for p in created) == ["Alpha", "Beta", "Gamma"]
+    assert sorted(f.name for f in drive.list_children(folder)) == ["Alpha", "Beta", "Gamma"]
+
+
+@pytest.mark.asyncio
+async def test_move_prompt_and_menu_details(harness, authorised_group, drive):
+    from mg_archive_bot.bot import keyboards
+    from mg_archive_bot.services import collections as collection_service
+    from mg_archive_bot.services.drive import DriveError
+
+    bot = harness.bot
+    other = FakeUser(2002, "Olga", "Other", username="olga")
+    with session_scope() as s:
+        user_service.register_designer(s, other.id, other.full_name, other.username)
+        user_service.set_role(s, other.id, Role.TEAM_LEAD, SUPER_ADMIN_ID)
+    await run_wizard(harness, name="Song")
+    with session_scope() as s:
+        p = project_service.list_projects(s)[0]
+        pid, root_id = p.id, p.drive_root_id
+
+    def collections() -> list[str]:
+        with session_scope() as s:
+            return [c.name for c in collection_service.list_collections(s) if c.name != "Waiting Room"]
+
+    def folders_at_root() -> list[str]:
+        return sorted(f.name for f in drive.list_children(drive.ROOT_ID) if f.is_folder)
+
+    # the button is acknowledged before Google Drive is asked to do anything (its answer may come too late otherwise)
+    from tests.fakes import FakeCallbackQuery
+
+    events: list[str] = []
+    real_answer, real_move = FakeCallbackQuery.answer, drive.move
+
+    async def answer(self, *args, **kwargs):
+        events.append("answer")
+        return await real_answer(self, *args, **kwargs)
+
+    def watched_move(*args, **kwargs):
+        events.append("move")
+        return real_move(*args, **kwargs)
+
+    with session_scope() as s:
+        waiting = collection_service.create_collection(s, "Waiting Room", LEAD.id)
+        s.commit()
+        waiting_id = waiting.id
+    FakeCallbackQuery.answer, drive.move = answer, watched_move  # type: ignore[method-assign]
+    try:
+        await harness.press(LEAD, f"pj:{pid}:setcol:{waiting_id}")
+        await harness.press(LEAD, f"pj:{pid}:setcol:none")
+    finally:
+        FakeCallbackQuery.answer, drive.move = real_answer, real_move  # type: ignore[method-assign]
+    assert events == ["answer", "move", "answer", "move"] and drive.path_of(root_id) == "Archive Root/Song"
+    assert folders_at_root() == ["Song", "Waiting Room"]
+
+    # Google Drive fails while the typed collection is being set up: nothing is left behind, the name can be sent again
+    real_move = drive.move
+
+    def refuse(*args, **kwargs):
+        raise DriveError("Google Drive error 500")
+
+    drive.move = refuse  # type: ignore[method-assign]
+    await harness.press(LEAD, f"pj:{pid}:setcol:new")
+    await harness.text(LEAD, "Typo Colection")
+    assert "did not confirm the move" in bot.last(LEAD.id)["text"] and "Send the name again to retry, or /cancel." in bot.last(LEAD.id)["text"]
+    assert collections() == [] and drive.path_of(root_id) == "Archive Root/Song"
+    assert folders_at_root() == ["Song", "Waiting Room"]  # neither a record nor a folder of the typo remains
+    assert harness.user_data[LEAD.id]["prompt"]["kind"] == "move_collection"
+    drive.move = real_move  # type: ignore[method-assign]
+
+    # the lead changes while the prompt is open: the old lead can no longer move the project
+    with session_scope() as s:
+        project_service.set_lead(s, project_service.get_project(s, pid), other.id)
+        s.commit()
+    await harness.text(LEAD, "Easter")
+    assert bot.last(LEAD.id)["text"] == "Only this project's lead (or the Super Admin) can do that."
+    assert collections() == [] and drive.path_of(root_id) == "Archive Root/Song"
+    assert "prompt" not in harness.user_data[LEAD.id]
+    await harness.text(LEAD, "Easter")  # the prompt was closed: this is an ordinary search now
+    assert collections() == []
+    # ... nor can somebody who is no Team Lead any more
+    await harness.press(other, f"pj:{pid}:setcol:new")
+    with session_scope() as s:
+        user_service.set_role(s, other.id, Role.DESIGNER, SUPER_ADMIN_ID)
+    heard = len(bot.texts(other.id))
+    await harness.text(other, "Easter")
+    assert collections() == [] and drive.path_of(root_id) == "Archive Root/Song"
+    assert len(bot.texts(other.id)) == heard and "prompt" not in harness.user_data[other.id]  # dropped without a word
+    with session_scope() as s:
+        user_service.set_role(s, other.id, Role.TEAM_LEAD, SUPER_ADMIN_ID)
+        project_service.set_lead(s, project_service.get_project(s, pid), LEAD.id)
+        s.commit()
+
+    # the project is cancelled while the prompt is open: the prompt closes and no collection is created
+    await harness.press(LEAD, f"pj:{pid}:setcol:new")
+    await harness.press(ADMIN, f"pj:{pid}:revoke")
+    await harness.press(ADMIN, f"pj:{pid}:revoke2")
+    await harness.text(LEAD, "Easter 2027")
+    assert bot.last(LEAD.id)["text"] == "This project was cancelled in the meantime. Restore it before moving it."
+    assert "prompt" not in harness.user_data[LEAD.id]
+    await harness.text(LEAD, "Another Try")
+    assert collections() == [] and folders_at_root() == ["Waiting Room"]  # the project's folder is in the trash
+    await harness.press(ADMIN, f"pj:{pid}:restore")
+
+    # names with special characters are shown as typed, in private and in the group
+    await harness.press(LEAD, f"pj:{pid}:setcol:new")
+    await harness.text(LEAD, 'Q&A "Live"')
+    assert "is now in <b>Q&amp;A \"Live\"</b>" in bot.last(LEAD.id)["text"]
+    assert "is now part of the collection <b>Q&amp;A \"Live\"</b>" in bot.last(GROUP.id)["text"]
+    assert drive.path_of(root_id) == 'Archive Root/Q&A "Live"/Song'
+
+    # a label the lead typed for a top-level project is replaced by the collection's name: the menu says so
+    await harness.press(LEAD, f"pj:{pid}:setcol:none")
+    q = await harness.press(LEAD, f"pj:{pid}:col")
+    assert "will be replaced" not in q.edits[-1]["text"]
+    await harness.press(LEAD, f"pj:{pid}:meta")
+    await harness.press(LEAD, f"pj:{pid}:mf:collection")
+    await harness.text(LEAD, "Christmas Series")
+    q = await harness.press(LEAD, f"pj:{pid}:col")
+    assert "<i>Its Collection label “Christmas Series” will be replaced by the name of the collection.</i>" in q.edits[-1]["text"]
+
+    # more collections than buttons: the menu says how to reach the others
+    with session_scope() as s:
+        for n in range(keyboards.MAX_COLLECTION_BUTTONS + 5):
+            collection_service.create_collection(s, f"Series {n:02d}", LEAD.id)
+        s.commit()
+    q = await harness.press(LEAD, f"pj:{pid}:col")
+    total = keyboards.MAX_COLLECTION_BUTTONS + 7  # the Series, Q&A "Live" and the Waiting Room
+    assert f"Showing {keyboards.MAX_COLLECTION_BUTTONS} of {total} collections." in q.edits[-1]["text"]
+    offered = [d for _, d in harness.buttons(q.edits[-1]["reply_markup"]) if ":setcol:" in d]
+    assert len(offered) == keyboards.MAX_COLLECTION_BUTTONS + 1 and offered[-1] == f"pj:{pid}:setcol:new"
+    await harness.press(LEAD, f"pj:{pid}:setcol:new")
+    await harness.text(LEAD, f"series {keyboards.MAX_COLLECTION_BUTTONS + 4:02d}")  # one that has no button
+    assert drive.path_of(root_id) == f"Archive Root/Series {keyboards.MAX_COLLECTION_BUTTONS + 4:02d}/Song"
+    assert len(collections()) == total - 1  # nothing new: the helper leaves the Waiting Room out
+
+
+@pytest.mark.asyncio
+async def test_file_listing_follows_a_move_and_a_rename(harness, authorised_group, drive):
+    bot = harness.bot
+    await run_wizard(harness, name="Song", collection="Building Fund 2026")
+    with session_scope() as s:
+        pid = project_service.list_projects(s)[0].id
+    await harness.press(LEAD, f"pj:{pid}:files")
+    assert "📂 <b>Building Fund 2026 / Song</b>" in bot.last(LEAD.id)["text"]
+    await harness.press(LEAD, f"pj:{pid}:setcol:none")
+    await harness.press(ADMIN, f"pj:{pid}:files")
+    assert "📂 <b>Song</b>" in bot.last(ADMIN.id)["text"] and "Building Fund" not in bot.last(ADMIN.id)["text"]
+    await harness.press(LEAD, f"pj:{pid}:rename")
+    await harness.text(LEAD, "Song of Thanks")
+    await harness.press(ADMIN, f"pj:{pid}:files")
+    assert "📂 <b>Song of Thanks</b>" in bot.last(ADMIN.id)["text"]
+
+
+@pytest.mark.asyncio
+async def test_moves_renames_and_new_archives_wait_for_each_other(harness, authorised_group, drive):
+    """Whatever decides a project's name or place runs one at a time, and says so when it has to wait."""
+    import asyncio
+
+    from mg_archive_bot.bot.access import placement_lock
+    from mg_archive_bot.services import collections as collection_service
+
+    bot = harness.bot
+    other = FakeUser(2002, "Olga", "Other", username="olga")
+    with session_scope() as s:
+        user_service.register_designer(s, other.id, other.full_name, other.username)
+        user_service.set_role(s, other.id, Role.TEAM_LEAD, SUPER_ADMIN_ID)
+    await run_wizard(harness, name="Opening")
+    await run_wizard(harness, name="Intro", collection="BF")
+    await run_wizard(harness, name="Gamma")
+    with session_scope() as s:
+        ids = {p.full_name: p.id for p in project_service.list_projects(s)}
+        bf = collection_service.find_by_name(s, "BF").id
+        bf_folder = collection_service.find_by_name(s, "BF").drive_id
+    real_move, real_rename, real_create = drive.move, drive.rename, drive.create_folder
+
+    def slowly(real):
+        def call(*args, **kwargs):
+            import time
+
+            time.sleep(0.03)
+            return real(*args, **kwargs)
+
+        return call
+
+    drive.move, drive.rename, drive.create_folder = slowly(real_move), slowly(real_rename), slowly(real_create)  # type: ignore[method-assign]
+
+    def in_bf() -> list[str]:
+        with session_scope() as s:
+            return sorted(p.name for p in project_service.list_projects(s) if p.collection_id == bf and p.status != ProjectStatus.DRAFT)
+
+    # a rename to "Opening" inside BF and the move of the top-level "Opening" into BF: one of them is refused
+    await harness.press(LEAD, f"pj:{ids['BF / Intro']}:rename")
+    renamed, moved = await asyncio.gather(harness.text(LEAD, "Opening"), harness.press(ADMIN, f"pj:{ids['Opening']}:setcol:{bf}"))
+    rename_ok = "Renamed" in bot.last(LEAD.id)["text"]
+    move_ok = moved.edits[-1]["text"].startswith("✅")
+    assert rename_ok != move_ok and in_bf().count("Opening") == 1 and len(in_bf()) == (2 if move_ok else 1)
+    assert sorted(f.name for f in drive.list_children(bf_folder)).count("Opening") == 1
+    await harness.command(LEAD, "/cancel")
+
+    # a new archive "BF / Gamma" is created while the existing "Gamma" is moved into BF: one of them is refused
+    await harness.command(other, "/newproject")
+    await harness.press(other, f"nw:col:{bf}")
+    await harness.text(other, "Gamma")
+    await harness.press(other, "nw:decl:done")
+    await harness.press(other, f"nw:grp:{GROUP.id}")
+    await harness.press(other, "nw:meta:skip")
+    await harness.press(other, "nw:asg:done")
+    created, moved = await asyncio.gather(harness.press(other, "nw:confirm"), harness.press(LEAD, f"pj:{ids['Gamma']}:setcol:{bf}"))
+    create_ok = "Archive created" in created.edits[-1]["text"]
+    move_ok = moved.edits[-1]["text"].startswith("✅")
+    assert create_ok != move_ok and in_bf().count("Gamma") == 1
+    assert sorted(f.name for f in drive.list_children(bf_folder)).count("Gamma") == 1
+    drive.move, drive.rename, drive.create_folder = real_move, real_rename, real_create  # type: ignore[method-assign]
+
+    # somebody else's change is in progress: the lead is told, and a /cancel sent meanwhile is respected
+    with session_scope() as s:
+        song_id = [p.id for p in project_service.list_projects(s) if p.name == "Intro" or p.name == "Opening"][0]
+        before = project_service.get_project(s, song_id).full_name
+    ctx = harness.ctx(LEAD)
+    await harness.press(LEAD, f"pj:{song_id}:setcol:new")
+    await placement_lock(ctx).acquire()
+    try:
+        waiting = asyncio.create_task(harness.text(LEAD, "Series"))
+        await asyncio.sleep(0.05)
+        assert bot.last(LEAD.id)["text"].startswith("⏳ Another change to the archive is in progress.")
+        await harness.command(LEAD, "/cancel")
+    finally:
+        placement_lock(ctx).release()
+    await waiting
+    assert "was not moved to “Series”: that step was closed before its turn came." in bot.last(LEAD.id)["text"]  # never silent
+    with session_scope() as s:
+        assert project_service.get_project(s, song_id).full_name == before
+        assert collection_service.find_by_name(s, "Series") is None
+    assert "Series" not in [f.name for f in drive.list_children(drive.ROOT_ID)]
+    # a typo that was cancelled stays cancelled when the same step is opened again and the right name is sent
+    await harness.press(LEAD, f"pj:{song_id}:setcol:new")
+    await placement_lock(ctx).acquire()
+    try:
+        typo = asyncio.create_task(harness.text(LEAD, "Eatser 2026"))
+        await asyncio.sleep(0.05)
+        await harness.command(LEAD, "/cancel")
+        await harness.press(LEAD, f"pj:{song_id}:setcol:new")
+        right = asyncio.create_task(harness.text(LEAD, "Easter 2026"))
+        await asyncio.sleep(0.05)
+    finally:
+        placement_lock(ctx).release()
+    await asyncio.gather(typo, right)
+    with session_scope() as s:
+        assert project_service.get_project(s, song_id).collection == "Easter 2026"
+        assert collection_service.find_by_name(s, "Eatser 2026") is None and collection_service.find_by_name(s, "Easter 2026") is not None
+    assert "Eatser 2026" not in [f.name for f in drive.list_children(drive.ROOT_ID)]
+    assert any("was not moved to “Eatser 2026”" in t for t in bot.texts(LEAD.id))
+    assert "prompt" not in harness.user_data[LEAD.id]  # the step that was carried out is closed
+    # a step the lead opened in the meantime is not closed by the one that finishes
+    await harness.press(LEAD, f"pj:{song_id}:setcol:new")
+    await placement_lock(ctx).acquire()
+    try:
+        first = asyncio.create_task(harness.text(LEAD, "Pentecost"))
+        await asyncio.sleep(0.05)
+        await harness.press(LEAD, f"pj:{song_id}:rename")  # another step, another prompt
+    finally:
+        placement_lock(ctx).release()
+    await first
+    assert "was not moved to “Pentecost”" in bot.last(LEAD.id)["text"]
+    assert harness.user_data[LEAD.id]["prompt"]["kind"] == "rename"
+    await harness.command(LEAD, "/cancel")
+    # ... also when that other step is opened while Google Drive is already moving the folder
+    real = drive.move
+
+    def slow(*args, **kwargs):
+        import time
+
+        time.sleep(0.15)
+        return real(*args, **kwargs)
+
+    drive.move = slow  # type: ignore[method-assign]
+    await harness.press(LEAD, f"pj:{song_id}:setcol:new")
+    moving = asyncio.create_task(harness.text(LEAD, "Pentecost"))
+    await asyncio.sleep(0.05)
+    await harness.press(LEAD, f"pj:{song_id}:rename")
+    await moving
+    drive.move = real  # type: ignore[method-assign]
+    with session_scope() as s:
+        assert project_service.get_project(s, song_id).collection == "Pentecost"
+    assert harness.user_data[LEAD.id]["prompt"]["kind"] == "rename"
+    await harness.command(LEAD, "/cancel")
+    with session_scope() as s:
+        before = project_service.get_project(s, song_id).full_name
+    # the same for a rename
+    await harness.press(LEAD, f"pj:{song_id}:rename")
+    await placement_lock(ctx).acquire()
+    try:
+        waiting = asyncio.create_task(harness.text(LEAD, "Never Mind"))
+        await asyncio.sleep(0.05)
+        assert bot.last(LEAD.id)["text"].startswith("⏳ Another change to the archive is in progress.")
+        await harness.command(LEAD, "/cancel")
+    finally:
+        placement_lock(ctx).release()
+    await waiting
+    assert "was not renamed to “Never Mind”: that step was closed before its turn came." in bot.last(LEAD.id)["text"]
+    with session_scope() as s:
+        assert project_service.get_project(s, song_id).full_name == before
+    # an ordinary rename is carried out and closes its step
+    await harness.press(LEAD, f"pj:{song_id}:rename")
+    await harness.text(LEAD, "Renamed Fine")
+    assert "Renamed" in bot.last(LEAD.id)["text"] and "prompt" not in harness.user_data[LEAD.id]
+
+
+@pytest.mark.asyncio
+async def test_collection_names_in_other_alphabets_and_a_database_failure(harness, authorised_group, drive):
+    from sqlalchemy.exc import OperationalError
+
+    from mg_archive_bot.services import collections as collection_service
+
+    bot = harness.bot
+    await run_wizard(harness, name="Opening", collection="NOËL 2026")
+    await run_wizard(harness, name="Song")
+    with session_scope() as s:
+        ids = {p.name: (p.id, p.drive_root_id) for p in project_service.list_projects(s)}
+    pid, root_id = ids["Song"]
+    # typing the name of an existing collection re-uses it, however it is spelled
+    await harness.press(LEAD, f"pj:{pid}:setcol:new")
+    await harness.text(LEAD, "noël 2026")
+    assert "is now in <b>NOËL 2026</b>" in bot.last(LEAD.id)["text"]
+    assert drive.path_of(root_id) == "Archive Root/NOËL 2026/Song"
+    with session_scope() as s:
+        assert [c.name for c in collection_service.list_collections(s)] == ["NOËL 2026"]
+        assert project_service.get_project(s, pid).full_name == "NOËL 2026 / Song"
+    assert sorted(f.name for f in drive.list_children(drive.ROOT_ID) if f.is_folder) == ["NOËL 2026"]
+    await harness.press(LEAD, f"pj:{pid}:setcol:new")
+    await harness.text(LEAD, "NOËL 2026")
+    assert "is already in NOËL 2026" in _plain(bot.last(LEAD.id)["text"])
+    await harness.command(LEAD, "/cancel")
+
+    # the database fails after Google Drive has moved the folder: the lead is told the truth, and a repeat repairs it
+    real_move_project = project_service.move_project
+
+    async def moved_but_not_saved(session, project, target, drive_client, settings):
+        await real_move_project(session, project, target, drive_client, settings)
+        raise OperationalError("UPDATE projects", {}, Exception("database is locked"))
+
+    project_service.move_project = moved_but_not_saved  # type: ignore[assignment]
+    try:
+        q = await harness.press(LEAD, f"pj:{pid}:setcol:none")
+    finally:
+        project_service.move_project = real_move_project  # type: ignore[assignment]
+    assert q.edits[-1]["text"].startswith(
+        "❌ The bot could not save the change. If the Google Drive folder was moved already, "
+        "choosing the same collection again puts the record right."
+    )
+    assert harness.buttons(q.edits[-1]["reply_markup"])[0] == ("📁 Top level (take it out of the collection)", f"pj:{pid}:setcol:none")
+    assert drive.path_of(root_id) == "Archive Root/Song"
+    with session_scope() as s:
+        assert project_service.get_project(s, pid).full_name == "NOËL 2026 / Song"  # the record is behind
+    q = await harness.press(LEAD, f"pj:{pid}:setcol:none")
+    assert q.edits[-1]["text"].startswith("✅") and drive.path_of(root_id) == "Archive Root/Song"
+    with session_scope() as s:
+        assert project_service.get_project(s, pid).full_name == "Song"
+    assert len([c for c in drive.calls if c[0] == "move"]) == 3
+
+
+@pytest.mark.asyncio
+async def test_same_new_collection_name_sent_twice_while_drive_recovers(harness, authorised_group, drive):
+    import asyncio
+
+    from mg_archive_bot.services import collections as collection_service
+    from mg_archive_bot.services.drive import DriveError
+
+    bot = harness.bot
+    await run_wizard(harness, name="Song")
+    await run_wizard(harness, name="Hymn")
+    with session_scope() as s:
+        ids = {p.name: (p.id, p.drive_root_id) for p in project_service.list_projects(s)}
+    real_move = drive.move
+    attempts = {"n": 0}
+
+    def first_fails(*args, **kwargs):
+        import time
+
+        attempts["n"] += 1
+        time.sleep(0.05)
+        if attempts["n"] == 1:
+            raise DriveError("Google Drive error 503")
+        return real_move(*args, **kwargs)
+
+    drive.move = first_fails  # type: ignore[method-assign]
+    await harness.press(LEAD, f"pj:{ids['Song'][0]}:setcol:new")
+    await harness.press(ADMIN, f"pj:{ids['Hymn'][0]}:setcol:new")
+    await asyncio.gather(harness.text(LEAD, "Easter 2027"), harness.text(ADMIN, "easter 2027"))
+    drive.move = real_move  # type: ignore[method-assign]
+    replies = sorted(t[:1] for t in (bot.last(LEAD.id)["text"], bot.last(ADMIN.id)["text"]))
+    assert replies == ["✅", "❌"]
+    with session_scope() as s:
+        stored = collection_service.list_collections(s)
+        assert len(stored) == 1 and stored[0].name.lower() == "easter 2027"
+        members = [p for p in project_service.list_projects(s) if p.collection_id == stored[0].id]
+        assert len(members) == 1
+        moved_root, folder = members[0].drive_root_id, stored[0].drive_id
+        left = [p for p in project_service.list_projects(s) if p.collection_id is None]
+        assert len(left) == 1
+    # Drive and the records agree, and there is one folder of that name
+    assert drive.get_file(moved_root).parents == (folder,) and drive.get_file(left[0].drive_root_id).parents == (drive.ROOT_ID,)
+    at_root = sorted(f.name for f in drive.list_children(drive.ROOT_ID) if f.is_folder)
+    assert len(at_root) == 2 and sum(name.lower() == "easter 2027" for name in at_root) == 1
+    # the one who was refused can simply send the name again
+    loser = LEAD if bot.last(LEAD.id)["text"].startswith("❌") else ADMIN
+    assert "Send the name again to retry, or /cancel." in bot.last(loser.id)["text"]
+    await harness.text(loser, "Easter 2027")
+    assert bot.last(loser.id)["text"].startswith("✅")
+    with session_scope() as s:
+        assert len(collection_service.list_collections(s)) == 1
+        assert all(p.collection_id is not None for p in project_service.list_projects(s))
+
+
+@pytest.mark.asyncio
+async def test_file_listing_made_during_a_move_is_not_kept(harness, authorised_group, drive):
+    import asyncio
+
+    bot = harness.bot
+    await run_wizard(harness, name="Song", collection="BF")
+    with session_scope() as s:
+        pid = project_service.list_projects(s)[0].id
+    real_move = drive.move
+
+    def slow_move(*args, **kwargs):
+        import time
+
+        time.sleep(0.1)
+        return real_move(*args, **kwargs)
+
+    drive.move = slow_move  # type: ignore[method-assign]
+    # the Super Admin asks for the files while the lead's move is in flight: that answer may carry the old name,
+    # but whoever asks afterwards gets the new one
+    await asyncio.gather(harness.press(LEAD, f"pj:{pid}:setcol:none"), harness.press(ADMIN, f"pj:{pid}:files"))
+    drive.move = real_move  # type: ignore[method-assign]
+    other = FakeUser(2002, "Olga", "Other", username="olga")
+    with session_scope() as s:
+        user_service.register_designer(s, other.id, other.full_name, other.username)
+        user_service.set_role(s, other.id, Role.TEAM_LEAD, SUPER_ADMIN_ID)
+        assert project_service.get_project(s, pid).full_name == "Song"
+    await harness.press(other, f"pj:{pid}:files")
+    assert "📂 <b>Song</b>" in bot.last(other.id)["text"] and "BF" not in bot.last(other.id)["text"]
+
+
+@pytest.mark.asyncio
+async def test_double_tap_on_a_destination_moves_once(harness, authorised_group, drive):
+    import asyncio
+
+    from mg_archive_bot.services import collections as collection_service
+    from tests.fakes import FakeChat, FakeMessage
+
+    bot = harness.bot
+    await run_wizard(harness, name="Song")
+    with session_scope() as s:
+        pid = project_service.list_projects(s)[0].id
+        bf = collection_service.create_collection(s, "BF", LEAD.id)
+        s.commit()
+        bf_id = bf.id
+    notices = len(bot.texts(GROUP.id))
+    menu = FakeMessage(bot, FakeChat(LEAD.id, "private"), text="(menu)", from_user=LEAD)  # both taps hit the same message
+    first, second = await asyncio.gather(
+        harness.press(LEAD, f"pj:{pid}:setcol:{bf_id}", message=menu), harness.press(LEAD, f"pj:{pid}:setcol:{bf_id}", message=menu)
+    )
+    assert len(bot.texts(GROUP.id)) == notices + 1 and len([c for c in drive.calls if c[0] == "move"]) == 1
+    finals = sorted(q.edits[-1]["text"][:1] for q in (first, second))
+    assert finals == ["ℹ", "✅"]
+    assert "❌" not in menu.text and ("📂 Collection", f"pj:{pid}:col") in harness.buttons(menu.reply_markup)
