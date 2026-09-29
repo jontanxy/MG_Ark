@@ -82,7 +82,7 @@ def project_menu_keyboard(project: Project, *, manage: bool = True) -> InlineKey
     rows: list[list[InlineKeyboardButton]] = [
         [_btn("🔎 Check progress", f"pj:{pid}:check"), _btn("📂 Files", f"pj:{pid}:files"), _btn("ℹ️ Details", f"pj:{pid}:details")],
         [_btn("📣 Announce", f"pj:{pid}:announce"), _btn("⏰ Remind", f"pj:{pid}:remind")],
-        [_btn("👥 Assign designers", f"pj:{pid}:assign"), _btn("🏷 Edit metadata", f"pj:{pid}:meta")],
+        [_btn("👥 Assign designers", f"pj:{pid}:assign"), _btn("🏷 Edit metadata", f"pj:{pid}:meta"), _btn("✏️ Rename", f"pj:{pid}:rename")],
         [_btn("⚙️ Declared assets", f"pj:{pid}:decl"), _btn("💬 MG group", f"pj:{pid}:group")],
         [_btn("🎞 Generate previews", f"pj:{pid}:prev"), _btn("▶️ Previews", f"pj:{pid}:previews")],
         [_btn("👑 Project lead", f"pj:{pid}:lead")],

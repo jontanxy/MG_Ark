@@ -48,6 +48,8 @@ async def route_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await projects.handle_wizard_meta(update, context, actor)
     elif kind == "meta_value":
         await projects.handle_meta_value(update, context, actor)
+    elif kind == "rename":
+        await projects.handle_rename(update, context, actor)
     elif kind == "search":
         await search.handle_search_text(update, context, actor)
     else:
