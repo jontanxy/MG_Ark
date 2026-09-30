@@ -4,7 +4,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-from sqlalchemy import create_engine, event, inspect, text
+from sqlalchemy import create_engine, event, inspect, literal
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
@@ -61,7 +61,9 @@ def upgrade_schema(engine: Engine) -> list[str]:
     """Add columns that newer versions introduced to tables created by older versions (SQLite-safe, additive only).
 
     ``create_all`` only creates missing *tables*; this fills in missing nullable/defaulted *columns* so an
-    existing database keeps working after an upgrade. Returns the ``table.column`` names that were added.
+    existing database keeps working after an upgrade. A column with a plain default (e.g. ``False`` for a new
+    declaration flag) is added with that value as its SQL ``DEFAULT``: existing rows read it instead of NULL, in
+    the same statement that adds the column, and no row is rewritten. Returns the ``table.column`` names added.
     """
     added: list[str] = []
     inspector = inspect(engine)
@@ -76,7 +78,13 @@ def upgrade_schema(engine: Engine) -> list[str]:
                 if column.primary_key or (not column.nullable and column.default is None and column.server_default is None):
                     raise RuntimeError(f"Cannot add required column {table.name}.{column.name} automatically")
                 ddl = f'ALTER TABLE "{table.name}" ADD COLUMN "{column.name}" {column.type.compile(engine.dialect)}'
-                conn.execute(text(ddl))
+                default = column.default
+                if default is not None and getattr(default, "is_scalar", False):
+                    rendered = literal(default.arg, column.type).compile(
+                        dialect=engine.dialect, compile_kwargs={"literal_binds": True}
+                    )
+                    ddl += f" DEFAULT {rendered}"
+                conn.exec_driver_sql(ddl)  # as written: a ':' inside a default is text, not a parameter
                 added.append(f"{table.name}.{column.name}")
     return added
 

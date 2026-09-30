@@ -780,9 +780,13 @@ async def test_project_index_sheet_is_kept_in_sync(harness, authorised_group, dr
     ctx = harness.ctx(LEAD)
     await flush_sheet_syncs(ctx)
     sheet_id = next(iter(harness.sheets.books))
-    rows = harness.sheets.get_values(sheet_id, "'Projects'!A:Y")
-    assert rows[0][0] == "ID" and len(rows) == 2
-    assert rows[1][2] == "Easter Opening 2026" and rows[1][3] == "Active" and rows[1][4] == "Lee Lead" and rows[1][6] == "Easter Service" and "Dee Signer" in rows[1][16]
+    from mg_archive_bot.services import tracking
+
+    col = tracking.HEADERS.index
+    rows = harness.sheets.get_values(sheet_id, "'Projects'!A:AA")
+    assert rows[0] == tracking.HEADERS and len(rows) == 2 and len(rows[1]) == len(tracking.HEADERS)
+    assert rows[1][2] == "Easter Opening 2026" and rows[1][3] == "Active" and rows[1][4] == "Lee Lead" and rows[1][6] == "Easter Service" and "Dee Signer" in rows[1][col("Assigned")]
+    assert [rows[1][col(h)] for h in ("Timeline", "Contin Videos", "Contin Lyrics", "Titlebars", "PSD")] == ["Yes", "Yes", "No", "No", "No"]
     assert drive.path_of(sheet_id) == "Archive Root/MG Archive Index"
     with session_scope() as s:
         p = project_service.list_projects(s)[0]
@@ -797,16 +801,16 @@ async def test_project_index_sheet_is_kept_in_sync(harness, authorised_group, dr
     await harness.press(LEAD, f"pj:{pid}:verify")
     await harness.press(LEAD, f"pj:{pid}:verify2")
     await flush_sheet_syncs(ctx)
-    rows = harness.sheets.get_values(sheet_id, "'Projects'!A:Y")
-    assert len(rows) == 2 and rows[1][3] == "Archived" and rows[1][8] == "cinematic" and rows[1][20] == "Lee Lead"
+    rows = harness.sheets.get_values(sheet_id, "'Projects'!A:AA")
+    assert len(rows) == 2 and rows[1][3] == "Archived" and rows[1][8] == "cinematic" and rows[1][col("Verified by")] == "Lee Lead"
     # /sheet gives the link; /sheet rebuild rewrites it
     await harness.command(LEAD, "/sheet")
     assert f"https://docs.google.com/spreadsheets/d/{sheet_id}/edit" in bot.last(LEAD.id)["text"] and "1 project" in bot.last(LEAD.id)["text"]
     harness.sheets.books[sheet_id]["Projects"] = [["garbage"]]
     await harness.command(LEAD, "/sheet rebuild")
     assert "Index rebuilt: 1 project" in bot.last(LEAD.id)["text"]
-    rows = harness.sheets.get_values(sheet_id, "'Projects'!A:Y")
-    assert rows[0][0] == "ID" and rows[1][2] == "Easter Opening 2026"
+    rows = harness.sheets.get_values(sheet_id, "'Projects'!A:AA")
+    assert rows[0] == tracking.HEADERS and rows[1][2] == "Easter Opening 2026"
     await harness.command(DESIGNER, "/sheet")
     assert "requires the Team Lead role" in bot.last(DESIGNER.id)["text"]
 
@@ -889,7 +893,7 @@ async def test_revoke_removes_the_index_sheet_row(harness, authorised_group, dri
     await run_wizard(harness, name="Third")
     await flush_sheet_syncs(ctx)
     sheet_id = next(iter(harness.sheets.books))
-    assert [r[2] for r in harness.sheets.get_values(sheet_id, "'Projects'!A:Y")[1:]] == ["First", "Second", "Third"]
+    assert [r[2] for r in harness.sheets.get_values(sheet_id, "'Projects'!A:AA")[1:]] == ["First", "Second", "Third"]
     with session_scope() as s:
         second = [p for p in project_service.list_projects(s) if p.name == "Second"][0].id
     await harness.press(LEAD, f"pj:{second}:revoke")
@@ -1362,3 +1366,359 @@ async def test_rename_project(harness, authorised_group, drive):
     await harness.press(LEAD, f"pj:{pid}:revoke2")
     q = await harness.press(LEAD, f"pj:{pid}:rename")
     assert q.answers[-1][1] is True and "Cancelled projects" in q.answers[-1][0]
+
+
+def _plain(html: str) -> str:
+    import re
+
+    return re.sub(r"<[^>]+>", "", html)
+
+
+@pytest.mark.asyncio
+async def test_titlebars_can_be_declared_in_the_wizard(harness, authorised_group, drive):
+    from mg_archive_bot.bot.actions import flush_sheet_syncs
+    from mg_archive_bot.services import tracking
+
+    bot = harness.bot
+    await harness.command(LEAD, "/newproject")
+    await harness.press(LEAD, "nw:col:none")
+    await harness.text(LEAD, "Conference Titles")
+    assert "Which assets" in bot.last(LEAD.id)["text"]
+    offered = harness.buttons(bot.last_markup(LEAD.id))
+    assert offered == [
+        ("⬜️ Timeline", "nw:decl:TIMELINE"),
+        ("⬜️ Contin Videos", "nw:decl:CONTIN_VIDEOS"),
+        ("⬜️ Contin Lyrics", "nw:decl:CONTIN_LYRICS"),
+        ("⬜️ Titlebars", "nw:decl:TITLEBARS"),
+        ("⬜️ PSD", "nw:decl:PSD"),
+        ("Continue ➡️", "nw:decl:done"),
+    ]
+    q = await harness.press(LEAD, "nw:decl:TITLEBARS")
+    assert ("✅ Titlebars", "nw:decl:TITLEBARS") in harness.buttons(q.edits[-1]["reply_markup"])
+    q = await harness.press(LEAD, "nw:decl:TITLEBARS")  # toggles off again
+    assert ("⬜️ Titlebars", "nw:decl:TITLEBARS") in harness.buttons(q.edits[-1]["reply_markup"])
+    await harness.press(LEAD, "nw:decl:TITLEBARS")
+    await harness.press(LEAD, "nw:decl:done")
+    await harness.press(LEAD, f"nw:grp:{GROUP.id}")
+    await harness.press(LEAD, "nw:meta:skip")
+    await harness.press(LEAD, f"nw:asg:{DESIGNER.id}")
+    q = await harness.press(LEAD, "nw:asg:done")
+    assert "<b>Declared assets:</b> Titlebars" in q.edits[-1]["text"]
+    q = await harness.press(LEAD, "nw:confirm")
+    assert "Archive created" in q.edits[-1]["text"]
+    announcement = bot.last(GROUP.id)["text"]
+    assert "• Final Render / Titlebars — " in announcement and "Titlebars /" not in announcement
+    assert "Timeline" not in announcement
+    with session_scope() as s:
+        p = project_service.list_projects(s)[0]
+        pid = p.id
+        assert p.has_titlebars and not p.has_timeline and p.asset_types == "Working Files, Titlebars"
+        assert drive.path_of(p.folder("titlebars").drive_id) == "Archive Root/Conference Titles/Final Render/Titlebars"
+        assert drive.list_children(p.folder("titlebars").drive_id) == []  # one folder, nothing inside
+        assert sorted(f.name for f in drive.list_children(p.folder("final_render").drive_id)) == ["Contin Lyrics", "Contin Videos", "Timeline", "Titlebars"]
+        folders = {f.key: f.drive_id for f in p.folders}
+    await flush_sheet_syncs(harness.ctx(LEAD))
+    sheet_id = next(iter(harness.sheets.books))
+    rows = harness.sheets.get_values(sheet_id, f"'Projects'!A:{tracking.LAST_COL}")
+    assert rows[0] == tracking.HEADERS and rows[1][tracking.HEADERS.index("Titlebars")] == "Yes"
+    assert rows[1][tracking.HEADERS.index("Asset types")] == "Working Files, Titlebars"
+    # the whole life cycle works with Titlebars as the only declared asset
+    q = await harness.press(LEAD, f"pj:{pid}:check")
+    assert "❌ Final Render / Titlebars  👤" in _plain(q.edits[-1]["text"]) and q.edits[-1]["text"].count("❌") == 3
+    assert f'<a href="https://drive.google.com/drive/folders/{folders["titlebars"]}">' in q.edits[-1]["text"]
+    for key in ("fonts", "ae", "titlebars"):
+        drive.put_file(folders[key], f"{key}.mov")
+    drive.put_file(folders["titlebars"], "second.png")
+    q = await harness.press(LEAD, f"pj:{pid}:check")
+    assert "✅ Final Render / Titlebars (2 files)" in _plain(q.edits[-1]["text"])
+    assert "Ready for verification" in q.edits[-1]["text"]
+    await harness.press(LEAD, f"pj:{pid}:verify")
+    await harness.press(LEAD, f"pj:{pid}:verify2")
+    with session_scope() as s:
+        assert project_service.get_project(s, pid).status == ProjectStatus.ARCHIVED
+
+
+@pytest.mark.asyncio
+async def test_titlebars_can_be_added_to_an_existing_project(harness, authorised_group, drive):
+    from mg_archive_bot.bot.actions import flush_sheet_syncs
+    from mg_archive_bot.services import tracking
+
+    await run_wizard(harness)  # Timeline + Contin Videos, as before
+    with session_scope() as s:
+        p = project_service.list_projects(s)[0]
+        pid = p.id
+        assert not p.has_titlebars and p.folder("titlebars") is None
+        assert "Titlebars" not in [f.name for f in drive.list_children(p.folder("final_render").drive_id)]
+    q = await harness.press(LEAD, f"pj:{pid}:assign")
+    assert not any(d == f"pj:{pid}:asgcat:TITLEBARS" for _, d in harness.buttons(q.edits[-1]["reply_markup"]))
+    q = await harness.press(LEAD, f"pj:{pid}:decl")
+    assert ("⬜️ Titlebars", f"pj:{pid}:dt:TITLEBARS") in harness.buttons(q.edits[-1]["reply_markup"])
+    q = await harness.press(LEAD, f"pj:{pid}:dt:TITLEBARS")
+    assert q.answers[-1][0] == "Folder created on Drive"
+    assert ("✅ Titlebars", f"pj:{pid}:dt:TITLEBARS") in harness.buttons(q.edits[-1]["reply_markup"])
+    with session_scope() as s:
+        p = project_service.get_project(s, pid)
+        assert p.has_titlebars and p.asset_types == "Working Files, Timeline, Contin Videos, Titlebars"
+        assert drive.path_of(p.folder("titlebars").drive_id) == "Archive Root/Easter Opening 2026/Final Render/Titlebars"
+        titlebars = [f.name for f in drive.list_children(p.folder("final_render").drive_id) if f.name == "Titlebars"]
+        assert titlebars == ["Titlebars"]
+    # off and on again never duplicates the folders
+    await harness.press(LEAD, f"pj:{pid}:dt:TITLEBARS")
+    q = await harness.press(LEAD, f"pj:{pid}:dt:TITLEBARS")
+    assert q.answers[-1][0] == "Saved"
+    with session_scope() as s:
+        p = project_service.get_project(s, pid)
+        assert [f.name for f in drive.list_children(p.folder("final_render").drive_id)].count("Titlebars") == 1
+        assert drive.list_children(p.folder("titlebars").drive_id) == []
+    # it can now be assigned on its own, and the assignee is named next to the missing Titlebars folder
+    q = await harness.press(LEAD, f"pj:{pid}:assign")
+    assert ("Titlebars (0)", f"pj:{pid}:asgcat:TITLEBARS") in harness.buttons(q.edits[-1]["reply_markup"])
+    q = await harness.press(LEAD, f"pj:{pid}:asgcat:TITLEBARS")
+    assert "assign for <b>Titlebars</b>" in q.edits[-1]["text"]
+    q = await harness.press(LEAD, f"pj:{pid}:asg:TITLEBARS:{LEAD.id}")
+    assert q.answers[-1][0] == "Assigned"
+    with session_scope() as s:
+        p = project_service.get_project(s, pid)
+        assert (LEAD.id, AssetCategory.TITLEBARS) in {(a.user_id, a.category) for a in p.assignments}
+    q = await harness.press(LEAD, f"pj:{pid}:check")
+    lines = _plain(q.edits[-1]["text"]).splitlines()
+    assert [line for line in lines if "Titlebars" in line] == ["❌ Final Render / Titlebars  👤 Dee Signer, Lee Lead"]
+    assert [line for line in lines if "Contin Videos / ProRes" in line] == ["❌ Final Render / Contin Videos / ProRes 4444  👤 Dee Signer"]
+    await flush_sheet_syncs(harness.ctx(LEAD))
+    sheet_id = next(iter(harness.sheets.books))
+    row = harness.sheets.get_values(sheet_id, f"'Projects'!A:{tracking.LAST_COL}")[1]
+    assert row[tracking.HEADERS.index("Titlebars")] == "Yes" and row[tracking.HEADERS.index("PSD")] == "No"
+    # a designer cannot switch declarations, and junk button data is ignored
+    q = await harness.press(DESIGNER, f"pj:{pid}:dt:TITLEBARS")
+    with session_scope() as s:
+        assert project_service.get_project(s, pid).has_titlebars is True
+    q = await harness.press(LEAD, f"pj:{pid}:dt:TITLEBARZ")
+    assert q.answers[-1] == ("Invalid request.", True)
+
+
+def _make_legacy_sheet(harness) -> tuple[str, list[list[str]]]:
+    """Turn the harness's index sheet into what the previous version wrote (26 columns, no Titlebars), with a
+    column of notes that a teammate added to the right of it."""
+    from mg_archive_bot.services import tracking
+
+    sheet_id = next(iter(harness.sheets.books))
+    skip = tracking.HEADERS.index("Titlebars")
+    current = harness.sheets.get_values(sheet_id, "'Projects'!A:AA")
+    rows = [[c for i, c in enumerate(r + [""] * (27 - len(r))) if i != skip] for r in current]
+    assert rows[0] == tracking.PREVIOUS_HEADERS and all(len(r) == 26 for r in rows)
+    notes = ["Notes", *[f"note for {r[2]}" for r in rows[1:]]]
+    harness.sheets.books[sheet_id]["Projects"] = [row + [note] for row, note in zip(rows, notes, strict=True)]
+    harness.sheets.columns[sheet_id]["Projects"] = 27
+    harness.sheets.requests.clear()
+    return sheet_id, rows
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("first_action", ["edit", "revoke", "rebuild"])
+async def test_index_sheet_of_the_previous_version_is_upgraded_by_the_first_sync(harness, authorised_group, drive, first_action):
+    from mg_archive_bot.bot.actions import flush_sheet_syncs
+    from mg_archive_bot.services import tracking
+
+    col = tracking.HEADERS.index
+    ctx = harness.ctx(LEAD)
+    for name in ("First", "Second", "Third"):
+        await run_wizard(harness, name=name)
+    with session_scope() as s:
+        ids = {p.name: p.id for p in project_service.list_projects(s)}
+    await harness.press(LEAD, f"pj:{ids['First']}:decl")
+    await harness.press(LEAD, f"pj:{ids['First']}:dt:PSD")
+    await flush_sheet_syncs(ctx)
+    sheet_id, legacy_rows = _make_legacy_sheet(harness)
+    assert [r[2] for r in legacy_rows[1:]] == ["First", "Second", "Third"]
+
+    if first_action == "edit":
+        await harness.press(LEAD, f"pj:{ids['Second']}:meta")
+        await harness.press(LEAD, f"pj:{ids['Second']}:mf:style")
+        await harness.text(LEAD, "cinematic")
+        expected = ["First", "Second", "Third"]
+    elif first_action == "revoke":
+        await harness.press(LEAD, f"pj:{ids['Third']}:revoke")
+        await harness.press(LEAD, f"pj:{ids['Third']}:revoke2")
+        expected = ["First", "Second"]
+    else:
+        await harness.command(LEAD, "/sheet rebuild")
+        expected = ["First", "Second", "Third"]
+    await flush_sheet_syncs(ctx)
+
+    # the column was inserted in place: nothing else was re-formatted, and the teammate's column moved along
+    assert [next(iter(r)) for r in harness.sheets.requests] == ["insertDimension"]
+    assert harness.sheets.sheet_grids(sheet_id) == {"Projects": (0, 28)}
+    rows = harness.sheets.get_values(sheet_id, "'Projects'!A:AA")
+    assert rows[0] == tracking.HEADERS and [r[2] for r in rows[1:]] == expected
+    by_name = {r[2]: r for r in rows[1:]}
+    assert [by_name["First"][col(h)] for h in ("Contin Lyrics", "Titlebars", "PSD")] == ["No", "No", "Yes"]
+    assert [by_name["Second"][col(h)] for h in ("Contin Lyrics", "Titlebars", "PSD")] == ["No", "No", "No"]
+    for row in rows[1:]:
+        assert "Dee Signer" in row[col("Assigned")] and row[col("Created by")] == "Lee Lead"
+        assert row[col("Drive link")].startswith("https://drive.google.com/") and row[col("MG Group")] == "MG Team"
+    if first_action == "edit":
+        assert by_name["Second"][col("Style")] == "cinematic"
+    notes = [r[27] for r in harness.sheets.get_values(sheet_id, "'Projects'!A:AB")]
+    assert notes == ["Notes", "note for First", "note for Second", "note for Third"]
+    assert "sheet_failure_reported" not in ctx.bot_data
+    # later syncs are ordinary row updates: the layout is not rebuilt or re-formatted again
+    harness.sheets.requests.clear()
+    await harness.press(LEAD, f"pj:{ids['First']}:decl")
+    await harness.press(LEAD, f"pj:{ids['First']}:dt:TITLEBARS")
+    await flush_sheet_syncs(ctx)
+    rows = harness.sheets.get_values(sheet_id, "'Projects'!A:AA")
+    assert [r[2] for r in rows[1:]] == expected and rows[1][col("Titlebars")] == "Yes" and rows[2][col("Titlebars")] == "No"
+    assert harness.sheets.requests == []
+
+
+@pytest.mark.asyncio
+async def test_titlebars_folder_is_created_after_a_drive_failure(harness, authorised_group, drive):
+    from mg_archive_bot.services.drive import DriveError
+
+    await run_wizard(harness)
+    with session_scope() as s:
+        pid = project_service.list_projects(s)[0].id
+    real = drive.create_folder
+    state = {"down": True}
+
+    def flaky(name, parent_id):
+        if state["down"] and name == "Titlebars":
+            raise DriveError("Google Drive is unavailable")
+        return real(name, parent_id)
+
+    drive.create_folder = flaky
+    await harness.press(LEAD, f"pj:{pid}:decl")
+    q = await harness.press(LEAD, f"pj:{pid}:dt:PSD")
+    assert q.answers[-1][0] == "Folder created on Drive"
+    q = await harness.press(LEAD, f"pj:{pid}:dt:TITLEBARS")
+    assert q.answers[-1][1] is True and q.answers[-1][0].startswith("Saved, but Drive folder creation failed")
+    with session_scope() as s:
+        p = project_service.get_project(s, pid)
+        assert p.has_titlebars and p.folder("psd") is not None and p.folder("titlebars") is None
+        final_render = p.folder("final_render").drive_id
+    # while Drive is still failing a check reports the folder as missing, without a link, and does not crash
+    q = await harness.press(LEAD, f"pj:{pid}:check")
+    missing = [line for line in q.edits[-1]["text"].splitlines() if "Titlebars" in line]
+    assert len(missing) == 1 and missing[0].startswith("❌ Final Render / Titlebars  👤 ")  # the folder name is plain text: no link yet
+    # once Drive works again the next check (or background scan) creates it by itself
+    state["down"] = False
+    q = await harness.press(LEAD, f"pj:{pid}:check")
+    with session_scope() as s:
+        p = project_service.get_project(s, pid)
+        titlebars = p.folder("titlebars")
+        assert titlebars is not None and drive.path_of(titlebars.drive_id).endswith("Easter Opening 2026/Final Render/Titlebars")
+        assert [f.name for f in drive.list_children(final_render)].count("Titlebars") == 1
+        titlebars_id = titlebars.drive_id
+    assert f"folders/{titlebars_id}" in q.edits[-1]["text"]
+    drive.put_file(titlebars_id, "Title_01.mov")
+    q = await harness.press(LEAD, f"pj:{pid}:check")
+    assert "✅ Final Render / Titlebars (1 file)" in _plain(q.edits[-1]["text"])
+    # closed projects are never touched: even with the folder gone from the records AND from Drive, nothing is
+    # looked up or created for an archived or a cancelled project
+    from mg_archive_bot.bot import actions
+
+    with session_scope() as s:
+        p = project_service.get_project(s, pid)
+        drive.delete(titlebars_id)
+        for folder in list(p.folders):
+            if folder.key == "titlebars":
+                p.folders.remove(folder)
+        s.commit()
+    for status in (ProjectStatus.ARCHIVED, ProjectStatus.CANCELLED, ProjectStatus.DRAFT):
+        with session_scope() as s:
+            p = project_service.get_project(s, pid)
+            p.status = status
+            s.commit()
+            seen: list[tuple] = []
+            real_find, real_create = drive.find_child_folder, drive.create_folder
+            drive.find_child_folder = lambda *a, **k: seen.append(("find", a)) or real_find(*a, **k)
+            drive.create_folder = lambda *a, **k: seen.append(("create", a)) or real_create(*a, **k)
+            try:
+                await actions._repair_folders(s, p, drive, harness.bot_data["settings"])
+            finally:
+                drive.find_child_folder, drive.create_folder = real_find, real_create
+            assert seen == [] and p.folder("titlebars") is None, status
+            assert "Titlebars" not in [f.name for f in drive.list_children(final_render)], status
+    # an open project in the same state is repaired
+    with session_scope() as s:
+        p = project_service.get_project(s, pid)
+        p.status = ProjectStatus.INCOMPLETE
+        s.commit()
+        await actions._repair_folders(s, p, drive, harness.bot_data["settings"])
+        assert p.folder("titlebars") is not None and p.folder("titlebars").drive_id != titlebars_id
+        assert [f.name for f in drive.list_children(final_render)].count("Titlebars") == 1
+
+
+@pytest.mark.asyncio
+async def test_project_with_the_earlier_titlebars_layout_follows_the_new_one(harness, authorised_group, drive):
+    """What the live project looks like: Titlebars declared while it still had two format folders."""
+    from mg_archive_bot.bot import jobs
+    from mg_archive_bot.models import ProjectFolder
+    from mg_archive_bot.services.drive import folder_link
+    from mg_archive_bot.services.validation import latest_report
+
+    bot = harness.bot
+    await run_wizard(harness)
+    with session_scope() as s:
+        pid = project_service.list_projects(s)[0].id
+    await harness.press(LEAD, f"pj:{pid}:dt:TITLEBARS")
+
+    def add_format_folders(names=("ProRes 4444", "Hap/Hap Alpha")) -> dict[str, str]:
+        with session_scope() as s:
+            p = project_service.get_project(s, pid)
+            made = {}
+            for key, name in zip(("titlebars_prores", "titlebars_hap"), names, strict=True):
+                folder = drive.create_folder(name, p.folder("titlebars").drive_id)
+                p.folders.append(ProjectFolder(project_id=p.id, key=key, name=name, drive_id=folder.id, link=folder_link(folder.id)))
+                made[key] = folder.id
+            s.commit()
+            return made
+
+    def titlebars_state() -> tuple[list[str], list[str]]:
+        with session_scope() as s:
+            p = project_service.get_project(s, pid)
+            records = sorted(f.key for f in p.folders if f.key.startswith("titlebars"))
+            return records, sorted(f.name for f in drive.list_children(p.folder("titlebars").drive_id))
+
+    def removals() -> list[tuple]:
+        return [c for c in drive.calls if c[0] in ("delete", "move", "rename")]
+
+    # before any check every view works with the old records
+    made = add_format_folders()
+    for data in ("menu", "details", "decl", "assign"):  # (the Files view is looked at below: its answer is kept for a minute)
+        q = await harness.press(LEAD, f"pj:{pid}:{data}")
+        assert q.answers and not any("went wrong" in (a[0] or "") for a in q.answers), data
+    # a manual check: the bot follows the new layout, Google Drive is left exactly as it is
+    assert titlebars_state() == (["titlebars", "titlebars_hap", "titlebars_prores"], ["Hap/Hap Alpha", "ProRes 4444"])
+    q = await harness.press(LEAD, f"pj:{pid}:check")
+    assert titlebars_state() == (["titlebars"], ["Hap/Hap Alpha", "ProRes 4444"])
+    assert removals() == [] and not any(drive.get_file(i).trashed for i in made.values())
+    lines = [line for line in _plain(q.edits[-1]["text"]).splitlines() if "Titlebars" in line]
+    assert lines == ["❌ Final Render / Titlebars  👤 Dee Signer"]
+    with session_scope() as s:
+        p = project_service.get_project(s, pid)
+        assert [i.key for i in latest_report(s, p).required_items if i.category == "TITLEBARS"] == ["titlebars"]
+    # an upload that was still running when the bot was restarted arrives afterwards: it is there and it counts
+    clip = drive.put_file(made["titlebars_hap"], "Titlebars_Song_A_hap.mov")
+    await harness.command(DESIGNER, "/status", chat=GROUP)
+    assert "✅ Final Render / Titlebars (1 file)" in _plain(bot.last(GROUP.id)["text"])
+    assert drive.get_file(clip.id).trashed is False
+    await harness.press(ADMIN, f"pj:{pid}:files")
+    assert "Titlebars_Song_A_hap.mov" in bot.last(ADMIN.id)["text"]
+    # the background scan does the same for a project nobody looks at
+    add_format_folders(names=("ProRes 4444 b", "Hap b"))
+    await jobs.scan_job(harness.ctx(LEAD))
+    assert titlebars_state() == (["titlebars"], ["Hap b", "Hap/Hap Alpha", "ProRes 4444", "ProRes 4444 b"])
+    assert removals() == []
+    # an archived project keeps its records until it is open again
+    add_format_folders(names=("ProRes 4444 c", "Hap c"))
+    with session_scope() as s:
+        project_service.get_project(s, pid).status = ProjectStatus.ARCHIVED
+        s.commit()
+    await jobs.scan_job(harness.ctx(LEAD))
+    assert titlebars_state()[0] == ["titlebars", "titlebars_hap", "titlebars_prores"]
+    q = await harness.press(LEAD, f"pj:{pid}:details")
+    assert "Titlebars" in q.edits[-1]["text"]
+    await harness.press(LEAD, f"pj:{pid}:reopen")
+    await harness.press(LEAD, f"pj:{pid}:check")
+    assert titlebars_state()[0] == ["titlebars"] and removals() == []

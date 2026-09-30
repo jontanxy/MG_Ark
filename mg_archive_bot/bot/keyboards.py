@@ -7,15 +7,9 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from ..constants import CATEGORY_FLAGS, CATEGORY_LABELS, REVOCABLE_STATUSES, AssetCategory, ProjectStatus, Role
 from ..models import MGGroup, Project, User
 
-DECLARABLE = (AssetCategory.TIMELINE, AssetCategory.CONTIN_VIDEOS, AssetCategory.CONTIN_LYRICS, AssetCategory.PSD)
-ASSIGNABLE = (
-    AssetCategory.ALL,
-    AssetCategory.WORKING_FILE,
-    AssetCategory.TIMELINE,
-    AssetCategory.CONTIN_VIDEOS,
-    AssetCategory.CONTIN_LYRICS,
-    AssetCategory.PSD,
-)
+# Timeline, Contin Videos, Contin Lyrics, Titlebars, PSD: one source of truth, so a new asset type shows up everywhere.
+DECLARABLE = tuple(CATEGORY_FLAGS)
+ASSIGNABLE = (AssetCategory.ALL, AssetCategory.WORKING_FILE, *DECLARABLE)
 MAX_USER_BUTTONS = 60
 # Markers after names in assignment lists (Designers carry none).
 ROLE_MARKERS = {Role.TEAM_LEAD: " ★", Role.SUPER_ADMIN: " 👁️‍🗨️"}

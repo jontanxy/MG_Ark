@@ -13,14 +13,17 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import BadRequest, ChatMigrated, Forbidden, TelegramError
 from telegram.ext import ContextTypes
 
-from ..constants import PreviewStatus, build_folder_tree
+from ..constants import SCANNABLE_STATUSES, PreviewStatus, build_folder_tree
 from ..db import session_scope
 from ..models import PreviewAsset, Project, User
 from ..services import groups as group_service
 from ..services import notifications
+from ..services import projects as project_service
 from ..services import tracking
+from ..services.drive import DriveError
 from ..services.listing import build_listing, render_listing
 from ..services.previews import PreviewJob, PreviewOrphan, plan_previews, remove_orphans
+from ..services.projects import ProjectError
 from ..services.sheets import spreadsheet_url
 from ..services.validation import ScanResult, latest_report, validate_project
 from ..util import esc, human_size
@@ -172,6 +175,29 @@ class CheckOutcome:
     group_notified: bool = False
 
 
+async def _repair_folders(session: Session, project: Project, drive, settings) -> None:
+    """Bring an open project's folders in line with the layout: forget folders the layout no longer has, create
+    declared ones that are missing (Drive failed when the asset was switched on). Never raises."""
+    if not project.drive_root_id or project.status not in SCANNABLE_STATUSES:
+        return
+    forgotten = project_service.forget_obsolete_folders(session, project)
+    if forgotten:
+        session.commit()
+        log.info(
+            "Project %s: folders of an earlier layout are no longer tracked (left as they are on Google Drive): %s",
+            project.id,
+            "; ".join(f"{name} {link}" for _, name, link in forgotten),
+        )
+    try:
+        created = await project_service.ensure_folders(session, project, drive, settings)
+    except (ProjectError, DriveError) as exc:
+        log.warning("Could not create the missing folders of project %s: %s", project.id, exc)
+        return
+    if created:
+        session.commit()
+        log.info("Created missing folders for project %s: %s", project.id, ", ".join(created))
+
+
 async def check_project(
     context: ContextTypes.DEFAULT_TYPE,
     session: Session,
@@ -192,6 +218,7 @@ async def check_project(
     orphans: list[PreviewOrphan] = []
     async with project_lock(context, project.id):
         session.refresh(project)  # another scan may have committed while we waited for the lock
+        await _repair_folders(session, project, drive, settings)
         result = await validate_project(session, project, drive, settings)
         jobs: list[PreviewJob] = []
         if queue_previews and settings.previews_enabled and not result.report.had_errors:
@@ -360,14 +387,15 @@ async def sync_project_row(context: ContextTypes.DEFAULT_TYPE, project_id: int) 
                 return
             row = None if project.status.value == "CANCELLED" else tracking.build_row(session, project, context.bot_data["tz"])
         async with _sheet_lock(context):
+            sheets = context.bot_data["sheets"]
             if row is None:  # revoked: the row disappears and everything below moves up
-                await asyncio.to_thread(tracking.delete_row, context.bot_data["sheets"], sheet_id, project_id)
+                outcome = await asyncio.to_thread(tracking.delete_row, sheets, sheet_id, project_id)
             else:
-                outcome = await asyncio.to_thread(tracking.upsert_row, context.bot_data["sheets"], sheet_id, row)
-                if outcome == "needs_rebuild":  # column layout changed with a new version: rewrite every row
-                    with session_scope() as session:
-                        rows = tracking.all_rows(session, context.bot_data["tz"])
-                    await asyncio.to_thread(tracking.rebuild, context.bot_data["sheets"], sheet_id, rows)
+                outcome = await asyncio.to_thread(tracking.upsert_row, sheets, sheet_id, row)
+            if outcome == "needs_rebuild":  # column layout changed with a new version: rewrite header and every row
+                with session_scope() as session:
+                    rows = tracking.all_rows(session, context.bot_data["tz"])  # revoked projects are left out
+                await asyncio.to_thread(tracking.rebuild, sheets, sheet_id, rows)
         context.bot_data.pop("sheet_failure_reported", None)
     except Exception as exc:  # noqa: BLE001 - the index must never break the main flow
         await _report_sheet_failure(context, exc)

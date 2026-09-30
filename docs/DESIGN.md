@@ -62,11 +62,11 @@ tests/
 * **settings**: key/value — `access_password_hash` (scrypt, salted).
 * **mg_groups**: `chat_id` PK (re-keyed in place on basic-group → supergroup migration), `title`, `status` (ACTIVE|REVOKED), `created_by`, `authorised_at`, `revoked_by` (Super Admin id for a deliberate revoke; NULL when the bot was simply removed from the chat).
 * **provisioning_tokens**: `token` unique (`MG-XXXX-XXXX`), `created_by`, `expires_at` (24 h), `used_at`, `used_chat_id`.
-* **projects**: `id`, `name`, `status`, `lead_id` (the one Team Lead responsible; NULL only for legacy rows or after the lead lost the role — management then falls to the Super Admin until reassigned), declarations `has_timeline`, `has_contin_videos`, `has_contin_lyrics`, `has_psd`, metadata (`collection`, `description`, `event`, `ministry`, `style`, `colours`, `year`, `creator`, `asset_types`), `created_by`, `mg_group_chat_id` (nullable), `drive_root_id`, `drive_link`, `last_validated_at`, `last_complete` (bool), `last_reminder_at`, `verified_by`, `verified_at`, timestamps.
+* **projects**: `id`, `name`, `status`, `lead_id` (the one Team Lead responsible; NULL only for legacy rows or after the lead lost the role — management then falls to the Super Admin until reassigned), declarations `has_timeline`, `has_contin_videos`, `has_contin_lyrics`, `has_titlebars`, `has_psd`, metadata (`collection`, `description`, `event`, `ministry`, `style`, `colours`, `year`, `creator`, `asset_types`), `created_by`, `mg_group_chat_id` (nullable), `drive_root_id`, `drive_link`, `last_validated_at`, `last_complete` (bool), `last_reminder_at`, `verified_by`, `verified_at`, timestamps.
 * **collections**: `id`, `name` (unique, case-insensitive), `drive_id`/`link` (folder under the root, created lazily when the first sub-project is provisioned; an existing same-named folder is re-used), `created_by`. `projects.collection_id` → sub-projects live in `<root>/<Collection>/<Project>/…`; their `collection` metadata mirrors the folder name and is not editable separately. Project names are unique within a collection (or within the top level). Display name is `Collection / Project`.
 * **tags** + **project_tags**: normalised lowercase tag names.
 * **project_folders**: `project_id`, `key` (e.g. `timeline_prores`), `name`, `drive_id`, `link`.
-* **assignments**: `project_id`, `user_id`, `category` (ALL|WORKING_FILE|TIMELINE|CONTIN_VIDEOS|CONTIN_LYRICS|PSD).
+* **assignments**: `project_id`, `user_id`, `category` (ALL|WORKING_FILE|TIMELINE|CONTIN_VIDEOS|CONTIN_LYRICS|TITLEBARS|PSD).
 * **preview_assets**: `project_id`, `category`, `source_key`, `source_drive_id`, `source_name`, `source_fingerprint`, `preview_drive_id`, `preview_link`, `preview_name`, `size_bytes`, `status` (PENDING|READY|FAILED), `error`.
 * **validation_runs**: `project_id`, `run_at`, `complete`, `report_json` (audit trail).
 
@@ -85,6 +85,7 @@ tests/
     Contin Videos/         key contin_prores/contin_hap (required iff has_contin_videos)
     Contin Lyrics/
       PNG/                 key lyrics_png           (required iff has_contin_lyrics)
+    Titlebars/             key titlebars            (ONLY created when has_titlebars = true; required iff has_titlebars)
   _Previews/               key previews (bot-managed MP4 previews; not part of the spec tree)
 ```
 
@@ -96,7 +97,28 @@ The project root is created inside `DRIVE_ROOT_FOLDER_ID` (a folder in a Shared 
 
 A *leaf* is satisfied when it contains ≥1 non-folder, non-trashed file (searched recursively up to depth 3 so designers can upload sub-folders).
 
-Required leaves: `fonts`, `ae` always; `timeline_prores`, `timeline_hap` iff `has_timeline`; `contin_prores`, `contin_hap` iff `has_contin_videos`; `lyrics_png` iff `has_contin_lyrics`; `psd` iff `has_psd`.
+Required leaves: `fonts`, `ae` always; `timeline_prores`, `timeline_hap` iff `has_timeline`; `contin_prores`, `contin_hap` iff `has_contin_videos`; `lyrics_png` iff `has_contin_lyrics`; `titlebars` iff `has_titlebars`; `psd` iff `has_psd`.
+
+Declarable asset types live in one place, `constants.CATEGORY_FLAGS` (category → project flag); the wizard, the
+assignment list, validation, the details view and the index sheet all follow it. Titlebars were added after the
+first archives existed, so their folders are created on demand like PSD: existing projects are never changed
+unless a lead declares Titlebars for them. `db.upgrade_schema` adds the new column on start-up with its default in
+the same statement (`ALTER TABLE … ADD COLUMN has_titlebars BOOLEAN DEFAULT 0`), so existing rows read `0` without
+being rewritten (their `updated_at` is kept) and there is no second step that could be lost in a crash. The
+statement is sent to the driver as written (`exec_driver_sql`), so a default may contain any character.
+
+Folders created on demand can fail part-way (several assets switched on at once). `ensure_folders` records and
+commits the folders Drive did create before it re-raises, and every check or background scan of an open project first
+creates whatever declared folder is still missing (`actions._repair_folders`), so a Drive outage heals by itself.
+
+Titlebars is a single folder, `Final Render/Titlebars`, without format folders. For one evening it was split into
+`ProRes 4444` and `Hap/Hap Alpha`; projects that declared it then have records of those two folders
+(`constants.OBSOLETE_FOLDER_KEYS`). The same repair step makes the bot forget them
+(`projects.forget_obsolete_folders`): the two records are dropped, and **nothing is changed on Google Drive**. A
+file only exists on Drive once its upload has finished, so a folder that lists as empty may be receiving one; whether
+such a folder can go is for a person to decide. Files inside them count for `Titlebars`, as deep as the check looks
+(three levels below the Titlebars folder, so up to one sub-folder inside a former format folder). Archived and
+cancelled projects keep their records until they are open again.
 
 Result → `ValidationReport(items=[{key,label,category,required,file_count,ok,error}], complete)`. Stored in `validation_runs`.
 
@@ -122,7 +144,7 @@ Scans: every `SCAN_INTERVAL_MINUTES` (default 30) for all ACTIVE/INCOMPLETE/READ
 
 ## 6. Previews
 
-* Sources: `timeline_prores` (iff has_timeline) and `contin_prores` (iff has_contin_videos); video files by MIME `video/*` or extension `.mov .mxf .mp4 .m4v .avi`.
+* Sources: `timeline_prores` (iff has_timeline) and `contin_prores` (iff has_contin_videos), never the `titlebars` folder (overlays); video files by MIME `video/*` or extension `.mov .mxf .mp4 .m4v .avi`.
 * Plan: for each source file, a preview exists if `(source_drive_id, source_md5 or modifiedTime)` matches a READY row. New/changed → enqueue. FAILED rows are **not** retried by scheduled scans (multi-GB downloads); the Team Lead's *Generate previews* forces a retry. Unattended failures are DM'd to the project creator. Before downloading, free disk in `WORK_DIR` must exceed 1.3 × source size + 200 MB.
 * Worker (single background task, serialised): download → `ffmpeg -i in -vf "scale=w='trunc(min(1280,iw)/2)*2':h=-2,format=yuv420p" -c:v libx264 -preset medium -crf 26 -movflags +faststart -c:a aac -b:a 128k out.mp4` → upload the MP4 to `_Previews/` (name `<source stem>.mp4`) → store the row with its Drive link. The source download is deleted before the upload.
 * Delivery: **Drive links only.** The bot never uploads video to Telegram (no 50 MB limit, no local cache): *Preview* replies with a URL button that opens the MP4 in Google Drive's player. Statuses are PENDING / READY / FAILED.
@@ -185,7 +207,7 @@ Bot in a chat with no authorisation and no valid token within `UNAUTHORISED_GROU
 
 0. Location: top level, an existing collection, or a new collection name (folder under the root).
 1. Name (text, 2–100 chars, unique within that location).
-2. Asset declaration: inline toggles Timeline / Contin Videos / Contin Lyrics / PSD, then "Continue".
+2. Asset declaration: inline toggles Timeline / Contin Videos / Contin Lyrics / Titlebars / PSD, then "Continue".
 3. MG group: always an explicit choice among the ACTIVE groups (or "none — announce later"), with a hint on how to authorise a missing group. Nothing is auto-linked, so a Team Lead running several projects with separate chats always sees where the announcement will go.
 4. Optional metadata (event, collection, ministry, style, colours, tags, description) via "Add metadata now" / "Skip". Year defaults to current year; creator defaults to creator's name; asset types derived.
 5. Assign designers: multi-select of ACTIVE users (category ALL); refine per-category later from project menu.
@@ -201,9 +223,17 @@ Bot in a chat with no authorisation and no valid token within `UNAUTHORISED_GROU
 
 ## 12b. Project index sheet
 
-* `services/sheets.py` wraps the Sheets v4 API (values get/update/append/clear, batchUpdate) with an in-memory fake for tests / fake mode. `services/tracking.py` owns the layout: 25 columns (ID … Description), header frozen + bold + basic filter.
+* `services/sheets.py` wraps the Sheets v4 API (values get/update/append/clear, batchUpdate) with an in-memory fake for tests / fake mode. `services/tracking.py` owns the layout: 27 columns (ID … Description, `A`–`AA`; no range beyond the tab's grid is ever read or written, see the layout changes below), header frozen + bold + basic filter.
 * The spreadsheet is created once in the archive root via the Drive API (`mimeType=spreadsheet`) and its id is stored in `settings` (`tracking_sheet_id`); `TRACKING_SHEET_ID` can point at an existing sheet instead.
 * Sync = upsert by project ID (column A): after create, metadata/declaration/assignment/group changes, verify/reopen and any status transition from a scan. Syncs run as fire-and-forget tasks under one asyncio lock so handlers stay fast; failures are logged and DM'd to the Super Admin once. A nightly job (03:30 local) rebuilds the whole sheet from the database; `/sheet rebuild` does the same on demand.
+* Layout changes (a new column in a new version): the header row is the marker of the layout. `upsert_row` and `delete_row` change nothing when the header is not `HEADERS` and return `needs_rebuild`; `rebuild` then brings the sheet up to date. What it does first depends on the header it finds (`tracking.layout_of`):
+  * *current*: nothing. The filter and column widths are the user's to change, so the nightly rebuild leaves them alone.
+  * *previous version* (`PREVIOUS_HEADERS` = `HEADERS` without `ADDED_COLUMNS`): the new columns are inserted where they belong with `insertDimension`. Google moves the rest of the sheet with them: the data, a column somebody added to the right of the table, saved filter views, formats and references from other tabs. The insert is sent once, without retries, because repeating an insert that did arrive would add the column twice.
+  * *pending* (the inserted columns are there but still empty): an earlier attempt stopped before writing; nothing more to prepare.
+  * *anything else* (empty or unknown header): the grid is widened to 27 columns with `appendDimension` (a new spreadsheet is 26 wide and Google refuses ranges beyond the grid), the frozen bold header row and the filter are set up again, and the widths are fitted after the write.
+
+  Then the header, every row and the blanks that wipe left-over rows go out in **one** `values.update`. The table is therefore never empty and never half written: it is the old one until that request succeeds, and a rebuild that fails before it is repeated by the next sync. Rows are never left in one layout under the header of another.
+* The bot only writes values in columns `A`–`AA`. Rows, however, are handled as whole sheet rows: a revoke deletes the project's row (`deleteDimension`), new rows are inserted (`INSERT_ROWS`) and a rebuild writes `A`–`AA` in project-id order. Cells that somebody keeps to the right of `AA` are therefore removed with a revoked project's row and do not stay beside the same project after a rebuild: the sheet is not the place for per-project notes.
 * The database stays the source of truth; the sheet is a read-only view for humans. Scale: one row per project, well inside the 10-million-cell limit.
 
 ## 12a. Startup checks
