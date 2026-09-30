@@ -73,6 +73,7 @@ class DriveClient(Protocol):
     def delete(self, file_id: str) -> None: ...
     def restore(self, file_id: str) -> None: ...
     def rename(self, file_id: str, name: str) -> DriveFile: ...
+    def move(self, file_id: str, new_parent_id: str, name: str | None = None) -> DriveFile: ...
 
 
 def _escape_query_value(value: str) -> str:
@@ -289,6 +290,36 @@ class GoogleDriveClient:
         item = self._run(self._service().files().update(fileId=file_id, body={"name": name}, fields=self.FIELDS, supportsAllDrives=True))
         return self._to_file(item)
 
+    def move(self, file_id: str, new_parent_id: str, name: str | None = None) -> DriveFile:
+        """Put a file or folder into another folder (and optionally rename it) in one request. Ids never change."""
+        current = self.get_file(file_id)
+        if current is None:
+            raise DriveError("The folder no longer exists on Google Drive.")
+        changes: dict[str, str] = {}
+        if new_parent_id not in current.parents:
+            changes["addParents"] = new_parent_id
+        leaving = [p for p in current.parents if p != new_parent_id]
+        if leaving:
+            changes["removeParents"] = ",".join(leaving)
+        body = {"name": name} if name and name != current.name else {}
+        if not changes and not body:
+            return current
+        try:
+            item = self._run(
+                self._service().files().update(fileId=file_id, body=body, fields=self.FIELDS, supportsAllDrives=True, **changes)
+            )
+        except DriveError:
+            # The request may have been applied although its answer was lost (and a repeat is then refused):
+            # look at the folder itself before calling it a failure.
+            try:
+                after = self.get_file(file_id)
+            except DriveError:
+                after = None
+            if after is not None and after.parents == (new_parent_id,) and (not name or after.name == name):
+                return after
+            raise
+        return self._to_file(item)
+
 
 # --------------------------------------------------------------------------------------
 # In-memory fake (tests, and GOOGLE_AUTH_MODE=fake for trying the bot without Google)
@@ -441,6 +472,28 @@ class InMemoryDriveClient:
                 raise DriveError(f"file not found: {file_id}")
             f = node.file
             node.file = DriveFile(f.id, name, f.mime_type, f.size, f.md5, f.modified_time, f.parents, f.drive_id, f.trashed)
+            return node.file
+
+    def move(self, file_id: str, new_parent_id: str, name: str | None = None) -> DriveFile:
+        self.calls.append(("move", (file_id, new_parent_id, name)))
+        with self._lock:
+            node, target = self._nodes.get(file_id), self._nodes.get(new_parent_id)
+            if node is None:
+                raise DriveError(f"file not found: {file_id}")
+            if target is None or not target.file.is_folder or self._is_trashed(new_parent_id):
+                raise DriveError(f"folder not found: {new_parent_id}")
+            above = target
+            while above is not None:  # a folder cannot be put inside itself
+                if above.file.id == file_id:
+                    raise DriveError("a folder cannot be moved into itself")
+                above = self._nodes.get(above.file.parents[0]) if above.file.parents else None
+            for parent_id in node.file.parents:
+                parent = self._nodes.get(parent_id)
+                if parent is not None and file_id in parent.children:
+                    parent.children.remove(file_id)
+            target.children.append(file_id)
+            f = node.file
+            node.file = DriveFile(f.id, name or f.name, f.mime_type, f.size, f.md5, f.modified_time, (new_parent_id,), f.drive_id, f.trashed)
             return node.file
 
 

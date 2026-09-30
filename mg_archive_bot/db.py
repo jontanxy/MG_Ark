@@ -13,6 +13,12 @@ class Base(DeclarativeBase):
     pass
 
 
+def _unicode_lower(value):
+    """SQLite's own lower() only knows A-Z. Names are compared without case in SQL and in Python, and both must
+    agree for every alphabet ("Ärzte", "NOËL", "Ωmega")."""
+    return value.lower() if isinstance(value, str) else value
+
+
 _engine: Engine | None = None
 _session_factory: sessionmaker[Session] | None = None
 
@@ -41,6 +47,7 @@ def make_engine(database_url: str) -> Engine:
             cursor.execute("PRAGMA synchronous=NORMAL")
             cursor.execute("PRAGMA busy_timeout=5000")
             cursor.close()
+            dbapi_connection.create_function("lower", 1, _unicode_lower, deterministic=True)
 
     return engine
 

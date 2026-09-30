@@ -11,6 +11,7 @@ from ..models import MGGroup, Project, User
 DECLARABLE = tuple(CATEGORY_FLAGS)
 ASSIGNABLE = (AssetCategory.ALL, AssetCategory.WORKING_FILE, *DECLARABLE)
 MAX_USER_BUTTONS = 60
+MAX_COLLECTION_BUTTONS = MAX_USER_BUTTONS
 # Markers after names in assignment lists (Designers carry none).
 ROLE_MARKERS = {Role.TEAM_LEAD: " ★", Role.SUPER_ADMIN: " 👁️‍🗨️"}
 
@@ -24,6 +25,19 @@ def collection_choice_keyboard(collections) -> InlineKeyboardMarkup:
     for c in list(collections)[:MAX_USER_BUTTONS]:
         rows.append([_btn(f"📂 {c.name}", f"nw:col:{c.id}")])
     rows.append([_btn("➕ New collection…", "nw:col:new")])
+    return InlineKeyboardMarkup(rows)
+
+
+def collection_move_keyboard(project: Project, collections) -> InlineKeyboardMarkup:
+    """Where a project can go: out of its collection, into another one, or into a new one."""
+    pid = project.id
+    rows = []
+    if project.collection_id is not None:
+        rows.append([_btn("📁 Top level (take it out of the collection)", f"pj:{pid}:setcol:none")])
+    for c in [c for c in collections if c.id != project.collection_id][:MAX_COLLECTION_BUTTONS]:
+        rows.append([_btn(f"📂 {c.name}", f"pj:{pid}:setcol:{c.id}")])
+    rows.append([_btn("➕ New collection…", f"pj:{pid}:setcol:new")])
+    rows.append([_btn("◀️ Back to project", f"pj:{pid}:menu")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -77,7 +91,7 @@ def project_menu_keyboard(project: Project, *, manage: bool = True) -> InlineKey
         [_btn("🔎 Check progress", f"pj:{pid}:check"), _btn("📂 Files", f"pj:{pid}:files"), _btn("ℹ️ Details", f"pj:{pid}:details")],
         [_btn("📣 Announce", f"pj:{pid}:announce"), _btn("⏰ Remind", f"pj:{pid}:remind")],
         [_btn("👥 Assign designers", f"pj:{pid}:assign"), _btn("🏷 Edit metadata", f"pj:{pid}:meta"), _btn("✏️ Rename", f"pj:{pid}:rename")],
-        [_btn("⚙️ Declared assets", f"pj:{pid}:decl"), _btn("💬 MG group", f"pj:{pid}:group")],
+        [_btn("⚙️ Declared assets", f"pj:{pid}:decl"), _btn("💬 MG group", f"pj:{pid}:group"), _btn("📂 Collection", f"pj:{pid}:col")],
         [_btn("🎞 Generate previews", f"pj:{pid}:prev"), _btn("▶️ Previews", f"pj:{pid}:previews")],
         [_btn("👑 Project lead", f"pj:{pid}:lead")],
     ]
