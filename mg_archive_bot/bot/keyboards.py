@@ -132,14 +132,22 @@ def back_to_project_keyboard(project_id: int, extra_rows: list[list[InlineKeyboa
     return InlineKeyboardMarkup(rows)
 
 
-def assign_category_keyboard(project: Project) -> InlineKeyboardMarkup:
+def assign_category_keyboard(
+    project: Project, *, prefix: str | None = None, footer: tuple[str, str] | None = None
+) -> InlineKeyboardMarkup:
+    """One button per part of the project people can be assigned to, with how many are on it.
+
+    The project menu uses the defaults; the new-project wizard passes its own *prefix* and a Continue *footer*.
+    """
+    prefix = prefix or f"pj:{project.id}:asgcat"
+    footer_text, footer_data = footer or ("◀️ Back to project", f"pj:{project.id}:menu")
     rows = []
     for cat in ASSIGNABLE:
         if cat in CATEGORY_FLAGS and not project.flag(CATEGORY_FLAGS[cat]):
             continue
         n = sum(1 for a in project.assignments if a.category == cat)
-        rows.append([_btn(f"{CATEGORY_LABELS[cat]} ({n})", f"pj:{project.id}:asgcat:{cat.value}")])
-    rows.append([_btn("◀️ Back to project", f"pj:{project.id}:menu")])
+        rows.append([_btn(f"{CATEGORY_LABELS[cat]} ({n})", f"{prefix}:{cat.value}")])
+    rows.append([_btn(footer_text, footer_data)])
     return InlineKeyboardMarkup(rows)
 
 

@@ -14,7 +14,7 @@ from ..constants import (
 )
 from ..models import Project, User
 from ..util import clip_message, esc, fmt_dt, mention
-from .projects import assignees_for, required_leaves
+from .projects import assignable_parts, assigned_to_part, assignees_for, required_leaves
 from .validation import ValidationReport
 
 
@@ -36,6 +36,18 @@ def status_line(project: Project) -> str:
 
 def tags_line(project: Project) -> str:
     return " ".join(f"#{esc(t)}" for t in project.tag_names) if project.tags else "<i>no tags</i>"
+
+
+def assignment_overview(project: Project) -> list[str]:
+    """One line per part that has people on it, e.g. "• Contin Videos: Dee Signer". Plain names, HTML-escaped."""
+    lines = []
+    for category in assignable_parts(project):
+        people = assigned_to_part(project, category)
+        if people:
+            names = ", ".join(u.display_name for u in people[:MAX_MENTIONS])
+            extra = f" +{len(people) - MAX_MENTIONS} more" if len(people) > MAX_MENTIONS else ""
+            lines.append(f"• {esc(CATEGORY_LABELS[category])}: {esc(names)}{extra}")
+    return lines
 
 
 def announcement(project: Project, tree: list[FolderSpec]) -> str:

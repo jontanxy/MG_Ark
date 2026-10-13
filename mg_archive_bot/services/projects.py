@@ -280,13 +280,30 @@ def toggle_assignment(session: Session, project: Project, user_id: int, category
     return True
 
 
+def assignable_parts(project: Project) -> list[AssetCategory]:
+    """The parts people can be assigned to in this project: everything, the working files, and each declared asset."""
+    return [AssetCategory.ALL, AssetCategory.WORKING_FILE, *declared_categories(project)]
+
+
+def assigned_to_part(project: Project, category: AssetCategory) -> list[User]:
+    """People assigned to exactly this part (not counting "All assets"); revoked and view-only people are left out."""
+    people = [
+        a.user
+        for a in project.assignments
+        if a.category == category and a.user is not None and a.user.is_active and a.user.role in CONTRIBUTOR_ROLES
+    ]
+    return sorted(people, key=lambda u: u.display_name.lower())
+
+
 def assignees_for(project: Project, category: AssetCategory | None) -> list[User]:
-    """Users responsible for *category* (explicit or via ALL). ``None`` returns everyone assigned."""
+    """Users responsible for *category* (explicit or via ALL). ``None`` returns everyone assigned to a part the
+    project has (an assignment to an asset that was switched off counts again when it is switched back on)."""
+    parts = set(assignable_parts(project)) if category is None else None
     seen: dict[int, User] = {}
     for a in project.assignments:
         if a.user is None or not a.user.is_active or a.user.role not in CONTRIBUTOR_ROLES:
             continue  # never mention revoked or view-only people
-        if category is None or a.category == AssetCategory.ALL or a.category == category:
+        if (category is None and a.category in parts) or a.category == AssetCategory.ALL or a.category == category:
             seen.setdefault(a.user_id, a.user)
     return sorted(seen.values(), key=lambda u: u.display_name.lower())
 
@@ -610,6 +627,8 @@ def set_group(session: Session, project: Project, chat_id: int | None) -> None:
     if chat_id != project.mg_group_chat_id:
         project.status_message_id = None  # the live status message belongs to the old chat
         project.status_message_hash = None
+        project.announcement_message_id = None  # so does the announcement
+        project.announcement_message_hash = None
     project.mg_group_chat_id = chat_id
     session.flush()
 

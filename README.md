@@ -163,8 +163,15 @@ example somebody was assigned to Titlebars), an older version cannot read those 
 
 * `/newproject` — where it lives (top level, an existing collection, or a new collection such as `BF`) → name →
   toggle Timeline / Contin Videos / Contin Lyrics / Titlebars / PSD → **pick the MG Group** (every authorised group is listed;
-  the project is never linked to a chat silently) → optional metadata → assign designers → **Create archive**.
-  Folders are created and the announcement with folder links is posted to the chosen group only.
+  the project is never linked to a chat silently) → optional metadata → **who archives what** → **Create archive**.
+  In the who-archives-what step you pick a part (All assets, Working File, or each declared asset such as Contin
+  Videos or Titlebars) and tick the people for it; “All assets” covers every folder. Folders are created and the
+  announcement with folder links is posted to the chosen group only, with each folder naming the people who archive it.
+* The announcement stays current: when you change who archives what, the declared assets, the lead, the name or the
+  collection, the bot edits that message in place a few seconds later, and checks of open projects correct it if
+  anything else changed (for example someone's access was revoked). Telegram does not notify people about edits, so a newly assigned person is
+  not pinged by it. **Announce** posts a fresh copy and marks the earlier one as replaced. Announcements posted before
+  this version are not tracked; press **Announce** once to get one that updates itself.
 * One Team Lead can run several projects with separate group chats: each chat must be authorised once
   (`/creategroup` → add the bot to that group, or `/activate <token>` inside it) and then appears as a choice in the
   wizard and under **MG group** in the project menu. Renaming a group in Telegram is picked up automatically (from the
@@ -187,7 +194,7 @@ example somebody was assigned to Titlebars), an older version cannot read those 
   see a read-only menu. The lead receives the project's notifications, is named in the announcement and the index
   sheet, and can be changed via **👑 Project lead**. Revoking or demoting a lead frees their projects until a new lead
   is set (the Super Admin is told which ones).
-* `/projects` → project menu: **Check progress**, **Announce**, **Remind**, **Assign designers** (per folder group),
+* `/projects` → project menu: **Check progress**, **Announce**, **Remind**, **Assign designers** (who archives which part),
   **Files** (folder-by-folder listing with names and sizes), **Edit metadata**, **Rename** (renames the Drive folder
   too; links keep working, the group is told), **Declared assets**, **MG group**, **Collection** (move the project
   into or out of a collection),

@@ -13,7 +13,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import BadRequest, ChatMigrated, Forbidden, TelegramError
 from telegram.ext import ContextTypes
 
-from ..constants import SCANNABLE_STATUSES, PreviewStatus, build_folder_tree
+from ..constants import SCANNABLE_STATUSES, PreviewStatus, ProjectStatus, build_folder_tree
 from ..db import session_scope
 from ..models import PreviewAsset, Project, User
 from ..services import groups as group_service
@@ -69,6 +69,142 @@ async def post_to_group(context: ContextTypes.DEFAULT_TYPE, chat_id: int | None,
     """Send *text* to an MG group. Returns False (and logs) when the bot cannot post there."""
     message, _ = await send_to_group(context, chat_id, text)
     return message is not None
+
+
+# ----------------------------------------------------------------------------------------
+# Announcement: posted when the archive is created (or with "Announce"), then kept current in place
+# ----------------------------------------------------------------------------------------
+
+OUTDATED_ANNOUNCEMENT = "📦 <i>This announcement was replaced — see the latest one below.</i>"
+
+
+def announcement_text(context: ContextTypes.DEFAULT_TYPE, project: Project) -> str:
+    return notifications.announcement(project, tree_of(context))
+
+
+ANNOUNCEMENT_DELAY_SECONDS = 4.0  # changes made within this time become one edit of the group message
+
+
+def _announcement_lock(context: ContextTypes.DEFAULT_TYPE, project_id: int) -> asyncio.Lock:
+    """Posting and editing a project's announcement happen one at a time, so they never act on an old id."""
+    locks: dict[int, asyncio.Lock] = context.bot_data.setdefault("announcement_locks", {})
+    return locks.setdefault(project_id, asyncio.Lock())
+
+
+def _forget_announcement(project_id: int, message_id: int) -> None:
+    with session_scope() as session:
+        project = session.get(Project, project_id)
+        if project is not None and project.announcement_message_id == message_id:  # not a newer one
+            project.announcement_message_id = None
+            project.announcement_message_hash = None
+
+
+async def post_announcement(context: ContextTypes.DEFAULT_TYPE, session: Session, project: Project) -> bool:
+    """Post the project's announcement to its MG Group and remember it, so later changes edit it in place.
+
+    An earlier announcement of the same project is marked as replaced, so only one copy shows current
+    information. Returns False when the bot cannot post there.
+    """
+    session.commit()  # hand the connection back before waiting: presses queue on the lock and on Telegram's group limit
+    async with _announcement_lock(context, project.id):
+        session.refresh(project, ["announcement_message_id", "announcement_message_hash", "mg_group_chat_id"])
+        chat_before, previous = project.mg_group_chat_id, project.announcement_message_id
+        text = announcement_text(context, project)
+        session.commit()  # objects stay usable (expire_on_commit=False); no connection is held during the send
+        message, _chat_used = await send_to_group(context, chat_before, text)
+        if message is None:
+            return False
+        project.announcement_message_id = message.message_id
+        project.announcement_message_hash = _digest(text)
+        session.commit()
+        if previous is not None and previous != message.message_id:
+            try:
+                await context.bot.edit_message_text(OUTDATED_ANNOUNCEMENT, chat_id=chat_before, message_id=previous)
+            except TelegramError as exc:  # deleted meanwhile, or the group was migrated: nothing to mark
+                log.info("Earlier announcement %s/%s not marked as replaced: %s", chat_before, previous, exc)
+    return True
+
+
+async def refresh_announcement(context: ContextTypes.DEFAULT_TYPE, project_id: int) -> bool:
+    """Edit the project's announcement in place when what it shows has changed. Never posts a new message.
+
+    No database session is held while waiting for Telegram (group messages are rate limited and may queue).
+    Telegram does not notify anyone about an edit, so this is silent. If the message is gone (deleted by a
+    group admin, group migrated) it is forgotten; "Announce" posts a new one. Returns True when edited.
+    """
+    async with _announcement_lock(context, project_id):
+        with session_scope() as session:
+            project = session.get(Project, project_id)
+            if project is None:
+                return False
+            chat_id, message_id = project.mg_group_chat_id, project.announcement_message_id
+            if chat_id is None or message_id is None or project.status in (ProjectStatus.DRAFT, ProjectStatus.CANCELLED):
+                return False
+            if not group_service.is_group_authorised(session, chat_id):
+                return False
+            text = announcement_text(context, project)
+            digest = _digest(text)
+            if project.announcement_message_hash == digest:
+                return False
+        try:
+            await context.bot.edit_message_text(text, chat_id=chat_id, message_id=message_id)
+        except ChatMigrated as exc:  # a basic group became a supergroup: its old messages stay behind
+            log.info("Group %s migrated to %s; the announcement of project %s is forgotten", chat_id, exc.new_chat_id, project_id)
+            with session_scope() as session:
+                group_service.migrate_group(session, chat_id, exc.new_chat_id)
+            _forget_announcement(project_id, message_id)
+            return False
+        except BadRequest as exc:
+            if "not modified" not in str(exc).lower():
+                log.info("Announcement %s/%s could not be edited (%s); forgetting it", chat_id, message_id, exc)
+                _forget_announcement(project_id, message_id)
+                return False
+        except TelegramError as exc:  # pragma: no cover - network; tried again at the next change or check
+            log.warning("Announcement edit failed for project %s: %s", project_id, exc)
+            return False
+        with session_scope() as session:
+            project = session.get(Project, project_id)
+            if project is not None and project.announcement_message_id == message_id:
+                project.announcement_message_hash = digest
+    return True
+
+
+def schedule_announcement_refresh(context: ContextTypes.DEFAULT_TYPE, project_id: int) -> None:
+    """Bring the announcement up to date a few seconds from now, in the background.
+
+    Several changes in a row (ticking people one after another) become one edit, and no handler waits for
+    Telegram's per-group limit. A change made while the edit is under way schedules one more refresh.
+    """
+    pending: dict[int, asyncio.Task] = context.bot_data.setdefault("announcement_pending", {})
+    running: set[asyncio.Task] = context.bot_data.setdefault("announcement_tasks", set())
+    waiting = pending.get(project_id)
+    if waiting is not None and not waiting.done():
+        return  # it has not started yet, so it will read the latest state
+
+    async def _later() -> None:
+        try:
+            await asyncio.sleep(context.bot_data.get("announcement_delay", ANNOUNCEMENT_DELAY_SECONDS))
+        finally:
+            if pending.get(project_id) is asyncio.current_task():
+                pending.pop(project_id, None)
+        try:
+            await refresh_announcement(context, project_id)
+        except Exception:  # noqa: BLE001 - the announcement must never break anything else
+            log.exception("Announcement refresh of project %s failed", project_id)
+
+    task = asyncio.create_task(_later(), name=f"announcement-{project_id}")
+    pending[project_id] = task
+    running.add(task)
+    task.add_done_callback(running.discard)
+
+
+async def flush_announcement_refreshes(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Wait for every scheduled announcement refresh (tests, shutdown)."""
+    while True:
+        tasks = [t for t in context.bot_data.get("announcement_tasks", set()) if not t.done()]
+        if not tasks:
+            return
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 # ----------------------------------------------------------------------------------------
@@ -240,6 +376,8 @@ async def check_project(
         await asyncio.to_thread(remove_orphans, orphans, drive)
     if live != "skip" and not result.report.had_errors:
         await refresh_live_status(context, session, project, live_status_text(context, project, result.report), repost=live == "repost")
+    # changes made elsewhere (a designer's access revoked, a role changed) reach the announcement here
+    schedule_announcement_refresh(context, project.id)
     if result.became_ready:
         outcome.group_notified = await post_to_group(context, project.mg_group_chat_id, notifications.ready_message(project))
         target = project_owner_id(context, project)

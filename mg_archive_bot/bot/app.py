@@ -67,6 +67,15 @@ async def _post_init(application: Application) -> None:
     log.info("Bot @%s ready (Drive mode: %s)", me.username, settings.google_auth_mode)
 
 
+async def _post_stop(application: Application) -> None:
+    """Updates and jobs have stopped, but the bot can still talk to Telegram: send what is still pending."""
+    from .actions import flush_announcement_refreshes, flush_sheet_syncs
+
+    context = SimpleNamespace(bot=application.bot, bot_data=application.bot_data)
+    await flush_announcement_refreshes(context)
+    await flush_sheet_syncs(context)
+
+
 async def _post_shutdown(application: Application) -> None:
     from .actions import flush_sheet_syncs
 
@@ -84,6 +93,7 @@ def build_application(settings: Settings, drive: DriveClient, sheets=None) -> Ap
         .token(settings.telegram_bot_token)
         .defaults(defaults)
         .post_init(_post_init)
+        .post_stop(_post_stop)
         .post_shutdown(_post_shutdown)
         .concurrent_updates(True)
         .rate_limiter(AIORateLimiter(max_retries=3))  # queue bursts instead of tripping Telegram's flood limits
