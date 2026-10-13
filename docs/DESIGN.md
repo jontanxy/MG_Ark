@@ -155,13 +155,18 @@ Scans: every `SCAN_INTERVAL_MINUTES` (default 30) for all ACTIVE/INCOMPLETE/READ
 
 `/search worship, gold, particles` → terms split on commas (fallback: whitespace when no comma), trimmed, lower-cased, de-duplicated, empty removed. Every term must match at least one field (AND).
 
-Each term scores by its *best* tier: exact tag 10⁸ · project name 10⁶ · event/collection 10⁴ · other metadata (ministry, style, colours, year, creator, asset types; partial tag) 10² · description 1. Because tiers are separated by more than the term cap (20), one exact-tag match always outranks any number of lower-tier matches — the ranking order of §10 is strict. Ties: whole-name match first, then year desc, then name. Paginated 5 per page. DRAFT projects are excluded.
+Each term scores by its *best* tier: exact tag 10⁸ · project name 10⁶ · event/collection 10⁴ · other metadata (part of a tag, ministry, style, colours, year, asset types) 10² · description 1. People's names are never searched: the Creator field is left out on purpose, so a project is not found by who set it up. Because tiers are separated by more than the term cap (20), one exact-tag match always outranks any number of lower-tier matches — the ranking order of §10 is strict. Ties: whole-name match first, then year desc, then name. Paginated 5 per page. DRAFT projects are excluded.
+
+Every hit also carries, per term, the exact place it matched (`SearchHit.reasons`, e.g. `tag #gold`, `part of tag` shown as the full tag, `colours`, `event`), shown at the end of the result card.
+
+Creator defaults to the person who set the project up; when that is the Super Admin, it becomes the lead chosen in the wizard instead (`projects.set_lead` fills an empty Creator while the project is a draft).
 
 Each result:
 ```
 🎬 Easter Opening 2026
 #worship #gold #particles
 3 previews available · READY_FOR_VERIFICATION
+🔎 Matched “worship” in tag #worship · “gold” in tag #gold
 [Preview] [Open Archive] [Details]
 ```
 `Preview`: one preview → message with a "Play preview on Google Drive" URL button; several → one URL button per preview. `Open Archive`: URL button to the Drive folder. `Details`: full metadata + folder links + latest validation summary.

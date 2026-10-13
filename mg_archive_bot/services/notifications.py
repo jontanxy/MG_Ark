@@ -201,7 +201,16 @@ def project_details(project: Project, report: ValidationReport | None, tree: lis
     return clip_message("\n".join(lines))
 
 
-def search_result_card(project: Project) -> str:
+def match_line(reasons: dict[str, str]) -> str:
+    """Why a search result matched, e.g. "🔎 Matched “gold” in tag #gold · “red” in colours"."""
+    parts = [f"“{esc(term)}” in {esc(reason)}" for term, reason in reasons.items()]
+    return f"<i>🔎 Matched {' · '.join(parts)}</i>" if parts else ""
+
+
+def search_result_card(project: Project, reasons: dict[str, str] | None = None) -> str:
     n = len(project.ready_previews)
     previews = f"{n} preview{'s' if n != 1 else ''} available" if n else "no previews yet"
-    return clip_message(f"🎬 <b>{esc(project.full_name)}</b>\n\n{tags_line(project)}\n\n{previews} · {status_line(project)}")
+    text = f"🎬 <b>{esc(project.full_name)}</b>\n\n{tags_line(project)}\n\n{previews} · {status_line(project)}"
+    if reasons:
+        text += "\n" + match_line(reasons)
+    return clip_message(text)

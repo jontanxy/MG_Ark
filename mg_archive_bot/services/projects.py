@@ -104,11 +104,13 @@ def create_draft(
     for draft in stale_drafts(session, created_by):
         session.delete(draft)
     creator_user = session.get(User, created_by)
+    by_super_admin = creator_user is not None and creator_user.role == Role.SUPER_ADMIN
     project = Project(
         name=cleaned,
         status=ProjectStatus.DRAFT,
         created_by=created_by,
-        creator=creator_name or "",
+        # The Super Admin sets projects up for others: Creator then names the lead chosen in the wizard (set_lead).
+        creator="" if by_super_admin else (creator_name or ""),
         year=year,
         collection_id=collection.id if collection else None,
         collection=collection.name if collection else "",
@@ -138,6 +140,8 @@ def set_lead(session: Session, project: Project, user_id: int) -> User:
         raise ProjectError("The project lead must hold the Team Lead role (the Super Admin cannot lead a project).")
     project.lead_id = user.telegram_id
     project.lead = user
+    if project.status == ProjectStatus.DRAFT and not project.creator:
+        project.creator = user.display_name  # set up by the Super Admin: the lead stands as Creator
     session.flush()
     return user
 
