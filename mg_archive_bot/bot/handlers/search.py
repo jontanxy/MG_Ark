@@ -59,7 +59,7 @@ async def _send_results(update: Update, context: ContextTypes.DEFAULT_TYPE, quer
             has_more = (page + 1) * page_size < total
             await context.bot.send_message(
                 chat_id,
-                notifications.search_result_card(hit.project),
+                notifications.search_result_card(hit.project, hit.reasons),
                 reply_markup=search_card_keyboard(hit.project, view_only=_view_only(actor)),
             )
             if is_last and has_more:

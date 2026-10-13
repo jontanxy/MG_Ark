@@ -15,7 +15,7 @@ Requirements: `docs/REQUIREMENTS.md` · Design: `docs/DESIGN.md`
 | Progress tracking | Google Drive is the source of truth. Scheduled scans validate only the declared assets; status moves ACTIVE → INCOMPLETE / READY_FOR_VERIFICATION → ARCHIVED (Team Lead verification) |
 | Reminders | Daily reminder in the MG Group listing missing folders and mentioning the responsible designers; on-demand `/status` and `/remind` |
 | Previews | ProRes 4444 files in Timeline / Contin Videos are transcoded to small MP4s (ffmpeg) stored in `_Previews/` on Drive; **Preview** hands out their Drive links privately (nothing is uploaded to Telegram) |
-| Discovery | `/search worship, gold, particles` (AND, case-insensitive, de-duplicated) ranked: exact tag → name → event/collection → metadata → description. Result cards offer **Preview**, **Open Archive**, **Details** |
+| Discovery | `/search worship, gold, particles` (AND, case-insensitive, de-duplicated) ranked: exact tag → name → event/collection → metadata → description. People's names are not searched. Each result says what it matched, e.g. “gold” in tag #gold. Result cards offer **Preview**, **Open Archive**, **Details** |
 | Project index | A Google Sheet in the archive root with one row per project ever created, kept in sync automatically (`/sheet`) |
 | Roles | Super Admin (fixed Telegram ID), Team Lead, Designer — exactly the permissions in the requirements — plus **Lights**, a preview-only role (search + Preview, nothing else) that is never assigned uploads |
 | Access | Password registration on `/start` (never asked again), revocation, brute-force lockout, MG Groups authorised only via provisioning tokens, "authorised user AND authorised group" rule in groups |
@@ -221,7 +221,10 @@ example somebody was assigned to Titlebars), an older version cannot read those 
 
 **Everyone (private chat)**
 
-* `/search worship, gold` or simply type keywords. Each result has **Preview**, **Open Archive**, **Details** and
+* `/search worship, gold` or simply type keywords. Tags are the best way to be found: an exact tag ranks above
+  everything else. People's names are not searched (a project's Creator is shown in Details but never matched).
+  Every result card ends with what it matched on, for example *Matched “gold” in tag #gold · “red” in colours*.
+  Each result has **Preview**, **Open Archive**, **Details** and
   **Files** — a folder-by-folder list of what has been uploaded (file names and sizes, folders linked to Drive).
 
 **MG Group**

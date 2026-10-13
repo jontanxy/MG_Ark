@@ -3097,3 +3097,61 @@ async def test_a_saved_change_reaches_the_announcement_even_if_the_button_answer
             FakeCallbackQuery.answer = real_answer
         await flush_announcement_refreshes(harness.ctx(LEAD))
         assert expected in _plain(bot.messages[(GROUP.id, message_id)]["text"]), data
+
+
+@pytest.mark.asyncio
+async def test_creator_is_the_lead_when_the_super_admin_sets_a_project_up(harness, authorised_group, drive):
+    await harness.command(ADMIN, "/newproject")
+    await harness.press(ADMIN, "nw:col:none")
+    await harness.text(ADMIN, "Set Up For Lee")
+    await harness.press(ADMIN, "nw:decl:done")
+    with session_scope() as s:
+        draft = [p for p in project_service.stale_drafts(s, ADMIN.id) if p.name == "Set Up For Lee"][0]
+        assert draft.creator == ""  # not the Super Admin
+    await harness.press(ADMIN, f"nw:lead:{LEAD.id}")
+    await harness.press(ADMIN, f"nw:grp:{GROUP.id}")
+    await harness.press(ADMIN, "nw:meta:skip")
+    await harness.press(ADMIN, "nw:asg:done")
+    await harness.press(ADMIN, "nw:confirm")
+    await run_wizard(harness, name="Set Up By Lee")  # a Team Lead sets up their own project
+    with session_scope() as s:
+        creators = {p.name: (p.creator, p.created_by, p.lead_id) for p in project_service.list_projects(s)}
+    assert creators["Set Up For Lee"] == ("Lee Lead", ADMIN.id, LEAD.id)
+    assert creators["Set Up By Lee"] == ("Lee Lead", LEAD.id, LEAD.id)
+    # a later change of lead does not rewrite who created it, and a Creator typed by hand is kept
+    olga = FakeUser(2002, "Olga", "Other", username="olga")
+    with session_scope() as s:
+        user_service.register_designer(s, olga.id, olga.full_name, olga.username)
+        user_service.set_role(s, olga.id, Role.TEAM_LEAD, SUPER_ADMIN_ID)
+        pid = [p for p in project_service.list_projects(s) if p.name == "Set Up For Lee"][0].id
+    await harness.press(ADMIN, f"pj:{pid}:setlead:{olga.id}")
+    with session_scope() as s:
+        p = project_service.get_project(s, pid)
+        assert (p.lead_id, p.creator) == (olga.id, "Lee Lead")
+        project_service.set_metadata_field(s, p, "creator", "")
+        s.commit()
+    await harness.press(ADMIN, f"pj:{pid}:setlead:{LEAD.id}")  # an emptied Creator is not refilled later either
+    with session_scope() as s:
+        assert project_service.get_project(s, pid).creator == ""
+
+
+@pytest.mark.asyncio
+async def test_search_cards_say_why_they_matched(harness, authorised_group, drive):
+    bot = harness.bot
+    await run_wizard(harness, with_meta=True)  # tags: worship, gold, particles; colours: gold, white
+    with session_scope() as s:
+        p = project_service.list_projects(s)[0]
+        project_service.set_metadata_field(s, p, "creator", "jonny boy")
+        s.commit()
+    await harness.command(LEAD, "/search gold, white")
+    card = bot.last(LEAD.id)["text"]
+    assert card.startswith("🎬 <b>Easter Opening 2026</b>")
+    assert card.endswith("<i>🔎 Matched “gold” in tag #gold · “white” in colours</i>")
+    await harness.text(LEAD, "jonny")  # plain text is a search too: a person's name finds nothing
+    assert "No projects match" in bot.last(LEAD.id)["text"]
+    lights = FakeUser(6001, "Lucy", "Lights", username="lucy")
+    with session_scope() as s:
+        user_service.register_designer(s, lights.id, lights.full_name, lights.username)
+        user_service.set_role(s, lights.id, Role.LIGHTS, SUPER_ADMIN_ID)
+    await harness.command(lights, "/search particles")
+    assert bot.last(lights.id)["text"].endswith("<i>🔎 Matched “particles” in tag #particles</i>")

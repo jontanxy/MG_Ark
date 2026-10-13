@@ -302,3 +302,57 @@ async def test_titlebars_are_validated_only_when_declared(db, settings, drive):
         project_service.set_declaration(s, p, AssetCategory.TITLEBARS, False)
         result = await validate_project(s, p, drive, settings)
         assert {i.key for i in result.report.required_items} == {"fonts", "ae"} and result.report.complete
+
+
+@pytest.mark.asyncio
+async def test_people_are_not_searchable_and_every_match_says_why(db, settings, drive):
+    with session_scope() as s:
+        grateful = await make_project(s, drive, settings, "God I'm Just Grateful (Sep 2026)")
+        project_service.set_metadata_field(s, grateful, "tags", "declaration, fresh, grateful")
+        project_service.set_metadata_field(s, grateful, "creator", "jonny boy")
+        assert grateful.creator == "jonny boy"
+        # a person's name is never a reason to show a project
+        for query in ("jon", "jonny", "jonny boy", "boy"):
+            assert search_service.search_projects(s, query) == [], query
+        # ...but a tag that happens to contain those letters is
+        jonah = await make_project(s, drive, settings, "Sign of Jonah")
+        project_service.set_metadata_field(s, jonah, "tags", "jonah, sea")
+        hits = search_service.search_projects(s, "jon")
+        assert [h.project.name for h in hits] == ["Sign of Jonah"]
+        assert hits[0].matched == {"jon": "name"} and hits[0].reasons == {"jon": "project name"}
+
+        # one reason per term, always the most important place it occurs
+        full = await make_project(s, drive, settings, "Opening Loop", CONTIN_VIDEOS=True)
+        for field, value in (
+            ("tags", "worship, golden hour, r&b"), ("event", "Easter Service"), ("collection", "Spring Series"),
+            ("ministry", "Youth"), ("style", "cinematic"), ("colours", "teal, amber"), ("year", "2024"),
+            ("description", "Slow particles over a warm haze"),
+        ):
+            project_service.set_metadata_field(s, full, field, value)
+        expected = {
+            "worship": "tag #worship",
+            "opening": "project name",
+            "easter": "event",
+            "spring": "collection",
+            "golden": "tag #golden hour",  # part of a tag
+            "youth": "ministry",
+            "cinematic": "style",
+            "amber": "colours",
+            "2024": "year",
+            "contin": "asset types",
+            "haze": "description",
+            "r&b": "tag #r&b",
+        }
+        for term, reason in expected.items():
+            hits = search_service.search_projects(s, term)
+            assert [h.project.name for h in hits] == ["Opening Loop"], term
+            assert hits[0].reasons == {term: reason}, term
+        # several terms: each says where it matched, in the order they were typed
+        hit = search_service.search_projects(s, "amber, worship, haze")[0]
+        assert list(hit.reasons.items()) == [("amber", "colours"), ("worship", "tag #worship"), ("haze", "description")]
+        card = notifications.search_result_card(hit.project, hit.reasons)
+        assert card.endswith("<i>🔎 Matched “amber” in colours · “worship” in tag #worship · “haze” in description</i>")
+        # text is escaped; a card without reasons has no such line
+        card = notifications.search_result_card(full, search_service.search_projects(s, "r&b")[0].reasons)
+        assert "“r&amp;b” in tag #r&amp;b" in card and "r&b" not in card.replace("#r&b", "")
+        assert "Matched" not in notifications.search_result_card(full)
