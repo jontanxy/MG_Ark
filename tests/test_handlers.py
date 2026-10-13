@@ -281,13 +281,18 @@ async def run_wizard(harness, *, with_meta: bool = False, name: str = "Easter Op
         await harness.text(LEAD, "gold, white")  # colours
         await harness.text(LEAD, "worship, gold, particles")  # tags
         await harness.text(LEAD, "Opening loop with particles")  # description
-        assert "Who is working" in bot.last(LEAD.id)["text"]
+        assert "Who archives what" in bot.last(LEAD.id)["text"]
         markup = bot.last_markup(LEAD.id)
     else:
         q = await harness.press(LEAD, "nw:meta:skip")
+        assert "Who archives what" in q.edits[-1]["text"]
         markup = q.edits[-1]["reply_markup"]
-    assert any(d == f"nw:asg:{DESIGNER.id}" for _, d in harness.buttons(markup))
-    await harness.press(LEAD, f"nw:asg:{DESIGNER.id}")
+    assert ("All assets (0)", "nw:asgcat:ALL") in harness.buttons(markup)
+    q = await harness.press(LEAD, "nw:asgcat:ALL")
+    assert any(d == f"nw:asg:ALL:{DESIGNER.id}" for _, d in harness.buttons(q.edits[-1]["reply_markup"]))
+    await harness.press(LEAD, f"nw:asg:ALL:{DESIGNER.id}")
+    q = await harness.press(LEAD, "nw:asg:parts")
+    assert "• All assets: Dee Signer" in q.edits[-1]["text"]
     q = await harness.press(LEAD, "nw:asg:done")
     assert "Ready to create" in q.edits[-1]["text"] and "Dee Signer" in q.edits[-1]["text"]
     q = await harness.press(LEAD, "nw:confirm")
@@ -1171,8 +1176,14 @@ async def test_lights_role_is_view_only(harness, authorised_group, drive):
     await harness.text(LEAD, "Second Song")
     await harness.press(LEAD, "nw:decl:done")
     await harness.press(LEAD, f"nw:grp:{GROUP.id}")
-    q = await harness.press(LEAD, "nw:meta:skip")
-    assert not any(d == f"nw:asg:{lights.id}" for _, d in harness.buttons(q.edits[-1]["reply_markup"]))
+    await harness.press(LEAD, "nw:meta:skip")
+    q = await harness.press(LEAD, "nw:asgcat:ALL")
+    offered = [d for _, d in harness.buttons(q.edits[-1]["reply_markup"])]
+    assert f"nw:asg:ALL:{DESIGNER.id}" in offered and not any(d.endswith(f":{lights.id}") for d in offered)
+    await harness.press(LEAD, f"nw:asg:ALL:{lights.id}")  # crafted: refused
+    with session_scope() as s:
+        draft = [p for p in project_service.stale_drafts(s, LEAD.id) if p.name == "Second Song"][0]
+        assert not any(a.user_id == lights.id for a in draft.assignments)
     await harness.command(LEAD, "/cancel")
     # the registration notice offers Lights directly
     await harness.command(STRANGER, "/start")
@@ -1295,11 +1306,12 @@ async def test_assignment_list_markers(harness, authorised_group):
     await harness.text(LEAD, "Markers")
     await harness.press(LEAD, "nw:decl:done")
     await harness.press(LEAD, f"nw:grp:{GROUP.id}")
-    q = await harness.press(LEAD, "nw:meta:skip")
+    await harness.press(LEAD, "nw:meta:skip")
+    q = await harness.press(LEAD, "nw:asgcat:WORKING_FILE")
     labels = {d: t for t, d in harness.buttons(q.edits[-1]["reply_markup"])}
-    assert labels[f"nw:asg:{ADMIN.id}"] == "⬜️ Boss 👁️‍🗨️"
-    assert labels[f"nw:asg:{LEAD.id}"] == "⬜️ Lee Lead ★"
-    assert labels[f"nw:asg:{DESIGNER.id}"] == "⬜️ Dee Signer"
+    assert labels[f"nw:asg:WORKING_FILE:{ADMIN.id}"] == "⬜️ Boss 👁️‍🗨️"
+    assert labels[f"nw:asg:WORKING_FILE:{LEAD.id}"] == "⬜️ Lee Lead ★"
+    assert labels[f"nw:asg:WORKING_FILE:{DESIGNER.id}"] == "⬜️ Dee Signer"
     assert "👁️‍🗨️ = Super Admin" in q.edits[-1]["text"]
     await harness.command(LEAD, "/cancel")
 
@@ -2588,3 +2600,500 @@ async def test_double_tap_on_a_destination_moves_once(harness, authorised_group,
     finals = sorted(q.edits[-1]["text"][:1] for q in (first, second))
     assert finals == ["ℹ", "✅"]
     assert "❌" not in menu.text and ("📂 Collection", f"pj:{pid}:col") in harness.buttons(menu.reply_markup)
+
+
+@pytest.mark.asyncio
+async def test_wizard_assigns_people_per_part(harness, authorised_group, drive):
+    """Who archives what is chosen per part while the archive is set up."""
+    bot = harness.bot
+    tia = FakeUser(3002, "Tia", "Titles", username="tia")
+    with session_scope() as s:
+        user_service.register_designer(s, tia.id, tia.full_name, tia.username)
+    await harness.command(LEAD, "/newproject")
+    await harness.press(LEAD, "nw:col:none")
+    await harness.text(LEAD, "More Than Able")
+    for part in ("CONTIN_VIDEOS", "CONTIN_LYRICS", "TITLEBARS"):
+        await harness.press(LEAD, f"nw:decl:{part}")
+    await harness.press(LEAD, "nw:decl:done")
+    await harness.press(LEAD, f"nw:grp:{GROUP.id}")
+    q = await harness.press(LEAD, "nw:meta:skip")
+    assert q.edits[-1]["text"].startswith("👥 <b>Who archives what?</b>") and "Nobody assigned yet." in q.edits[-1]["text"]
+    assert harness.buttons(q.edits[-1]["reply_markup"]) == [
+        ("All assets (0)", "nw:asgcat:ALL"),
+        ("Working File (0)", "nw:asgcat:WORKING_FILE"),
+        ("Contin Videos (0)", "nw:asgcat:CONTIN_VIDEOS"),
+        ("Contin Lyrics (0)", "nw:asgcat:CONTIN_LYRICS"),
+        ("Titlebars (0)", "nw:asgcat:TITLEBARS"),
+        ("Continue ➡️", "nw:asg:done"),
+    ]
+    screen = len(bot.sent)
+    for crafted in ("nw:asgcat:TIMELINE", "nw:asgcat:BOGUS", "nw:asgcat:", f"nw:asg:TIMELINE:{DESIGNER.id}", f"nw:asg:BOGUS:{DESIGNER.id}", "nw:asg:ALL:abc"):
+        q = await harness.press(LEAD, crafted)  # a part this project does not have, or junk: ignored
+        assert q.edits == [], crafted
+    assert len(bot.sent) == screen
+    # one person per part, and one person on two parts
+    q = await harness.press(LEAD, "nw:asgcat:CONTIN_VIDEOS")
+    assert "Who archives <b>Contin Videos</b>?" in q.edits[-1]["text"] and "👁️‍🗨️ = Super Admin" in q.edits[-1]["text"]
+    assert harness.buttons(q.edits[-1]["reply_markup"])[-1] == ("◀️ Done", "nw:asg:parts")
+    q = await harness.press(LEAD, f"nw:asg:CONTIN_VIDEOS:{DESIGNER.id}")
+    assert ("✅ Dee Signer", f"nw:asg:CONTIN_VIDEOS:{DESIGNER.id}") in harness.buttons(q.edits[-1]["reply_markup"])
+    await harness.press(LEAD, f"nw:asg:CONTIN_VIDEOS:{tia.id}")
+    await harness.press(LEAD, f"nw:asg:CONTIN_VIDEOS:{tia.id}")  # ticked twice: off again
+    await harness.press(LEAD, f"nw:asg:CONTIN_LYRICS:{DESIGNER.id}")
+    await harness.press(LEAD, f"nw:asg:TITLEBARS:{tia.id}")
+    await harness.press(LEAD, f"nw:asg:WORKING_FILE:{LEAD.id}")
+    q = await harness.press(LEAD, "nw:asg:parts")
+    assert ("Contin Videos (1)", "nw:asgcat:CONTIN_VIDEOS") in harness.buttons(q.edits[-1]["reply_markup"])
+    assert ("All assets (0)", "nw:asgcat:ALL") in harness.buttons(q.edits[-1]["reply_markup"])
+    overview = q.edits[-1]["text"].split("<b>So far</b>\n")[1]
+    assert overview.splitlines() == [
+        "• Working File: Lee Lead",
+        "• Contin Videos: Dee Signer",
+        "• Contin Lyrics: Dee Signer",
+        "• Titlebars: Tia Titles",
+    ]
+    q = await harness.press(LEAD, "nw:asg:done")
+    assert "<b>Who archives what:</b>\n• Working File: Lee Lead\n• Contin Videos: Dee Signer" in q.edits[-1]["text"]
+    q = await harness.press(LEAD, "nw:confirm")
+    assert "Archive created" in q.edits[-1]["text"]
+    with session_scope() as s:
+        p = project_service.list_projects(s)[0]
+        assert sorted((a.category.value, a.user_id) for a in p.assignments) == sorted([
+            ("WORKING_FILE", LEAD.id), ("CONTIN_VIDEOS", DESIGNER.id), ("CONTIN_LYRICS", DESIGNER.id), ("TITLEBARS", tia.id),
+        ])
+        announcement_id = p.announcement_message_id
+    # the announcement names the right people on each folder, and nobody on folders nobody was given
+    text = bot.messages[(GROUP.id, announcement_id)]["text"]
+    lines = [line for line in _plain(text).splitlines() if line.startswith("• ")]
+    assert lines == [
+        "• Working File / Fonts — open  👤 Lee Lead",
+        "• Working File / AE — open  👤 Lee Lead",
+        "• Final Render / Contin Videos / ProRes 4444 — open  👤 Dee Signer",
+        "• Final Render / Contin Videos / Hap/Hap Alpha — open  👤 Dee Signer",
+        "• Final Render / Contin Lyrics / PNG — open  👤 Dee Signer",
+        "• Final Render / Titlebars — open  👤 Tia Titles",
+    ]
+    assert "Assigned:</b> " in text and all(name in text.split("Assigned:</b>")[1] for name in ("Dee Signer", "Lee Lead", "Tia Titles"))
+
+
+@pytest.mark.asyncio
+async def test_wizard_still_accepts_buttons_sent_by_the_previous_version(harness, authorised_group):
+    await harness.command(LEAD, "/newproject")
+    await harness.press(LEAD, "nw:col:none")
+    await harness.text(LEAD, "Old Keyboard")
+    await harness.press(LEAD, "nw:decl:done")
+    await harness.press(LEAD, f"nw:grp:{GROUP.id}")
+    await harness.press(LEAD, "nw:meta:skip")
+    q = await harness.press(LEAD, f"nw:asg:{DESIGNER.id}")  # what the old "Who is working" list sent
+    assert ("✅ Dee Signer", f"nw:asg:ALL:{DESIGNER.id}") in harness.buttons(q.edits[-1]["reply_markup"])
+    with session_scope() as s:
+        draft = [p for p in project_service.stale_drafts(s, LEAD.id) if p.name == "Old Keyboard"][0]
+        assert [(a.category, a.user_id) for a in draft.assignments] == [(AssetCategory.ALL, DESIGNER.id)]
+    await harness.command(LEAD, "/cancel")
+
+
+@pytest.mark.asyncio
+async def test_announcement_follows_every_change(harness, authorised_group, drive):
+    """The announcement in the MG Group is edited in place; nothing new is posted for it."""
+    from mg_archive_bot.bot import jobs
+    from mg_archive_bot.bot.actions import OUTDATED_ANNOUNCEMENT, flush_announcement_refreshes, refresh_announcement
+
+    bot = harness.bot
+    ctx = harness.ctx(ADMIN)
+    other = FakeUser(2002, "Olga", "Other", username="olga")
+    with session_scope() as s:
+        user_service.register_designer(s, other.id, other.full_name, other.username)
+        user_service.set_role(s, other.id, Role.TEAM_LEAD, SUPER_ADMIN_ID)
+    await run_wizard(harness)  # Timeline + Contin Videos, Dee Signer on All assets
+    with session_scope() as s:
+        p = project_service.list_projects(s)[0]
+        pid, first = p.id, p.announcement_message_id
+    assert first is not None and bot.messages[(GROUP.id, first)]["text"].startswith("📦 <b>New archive: Easter Opening 2026</b>")
+
+    async def announcement() -> str:
+        await flush_announcement_refreshes(ctx)
+        with session_scope() as s:
+            message_id = project_service.get_project(s, pid).announcement_message_id
+        return _plain(bot.messages[(GROUP.id, message_id)]["text"]) if message_id else ""
+
+    async def folder_line(start: str) -> str:
+        return next(line for line in (await announcement()).splitlines() if line.startswith(start))
+
+    def posted_to_group() -> int:
+        return len(bot.texts(GROUP.id))
+
+    assert (await folder_line("• Final Render / Contin Videos / ProRes 4444")).endswith("👤 Dee Signer")
+    posts, edits = posted_to_group(), len(bot.edited)
+
+    # who archives what changes from the project menu
+    await harness.press(LEAD, f"pj:{pid}:asg:CONTIN_VIDEOS:{LEAD.id}")
+    assert (await folder_line("• Final Render / Contin Videos / ProRes 4444")).endswith("👤 Dee Signer, Lee Lead")
+    assert (await folder_line("• Final Render / Timeline / ProRes 4444")).endswith("👤 Dee Signer")
+    await harness.press(LEAD, f"pj:{pid}:asg:ALL:{DESIGNER.id}")  # Dee off everything
+    assert (await folder_line("• Final Render / Contin Videos / ProRes 4444")).endswith("👤 Lee Lead")
+    assert "👤" not in await folder_line("• Final Render / Timeline / ProRes 4444")
+    assert "Assigned: Lee Lead" in await announcement()
+    assert posted_to_group() == posts and len(bot.edited) == edits + 2  # edited twice, nothing posted
+    with session_scope() as s:
+        assert project_service.get_project(s, pid).announcement_message_id == first
+    q = await harness.press(LEAD, f"pj:{pid}:assign")  # the menu shows the same picture
+    assert "<b>So far</b>\n• Contin Videos: Lee Lead" in q.edits[-1]["text"]
+
+    # declared assets, lead, name and collection
+    await harness.press(LEAD, f"pj:{pid}:dt:TITLEBARS")
+    assert (await folder_line("• Final Render / Titlebars")).startswith("• Final Render / Titlebars — open")
+    await harness.press(LEAD, f"pj:{pid}:setlead:{other.id}")
+    assert "Lead: Olga Other" in await announcement()
+    await harness.press(other, f"pj:{pid}:rename")
+    await harness.text(other, "Easter Opening 2027")
+    assert (await announcement()).startswith("📦 New archive: Easter Opening 2027")
+    await harness.press(other, f"pj:{pid}:setcol:new")
+    await harness.text(other, "Building Fund 2026")
+    assert (await announcement()).startswith("📦 New archive: Building Fund 2026 / Easter Opening 2027")
+    with session_scope() as s:
+        assert project_service.get_project(s, pid).announcement_message_id == first
+
+    # a check that finds nothing new does not touch it; a change made elsewhere reaches it at the next check
+    edits = len(bot.edited)
+    await harness.press(other, f"pj:{pid}:check")
+    await flush_announcement_refreshes(ctx)
+    assert [e for e in bot.edited[edits:] if e["message_id"] == first] == []
+    await harness.press(other, f"pj:{pid}:asg:TITLEBARS:{DESIGNER.id}")
+    assert (await folder_line("• Final Render / Titlebars")).endswith("👤 Dee Signer")
+    with session_scope() as s:
+        user_service.revoke_user(s, DESIGNER.id, SUPER_ADMIN_ID)  # e.g. from /users
+    await jobs.scan_job(harness.ctx(ADMIN))
+    assert "👤" not in await folder_line("• Final Render / Titlebars") and "Dee Signer" not in await announcement()
+
+    # "Announce" posts a fresh copy, which is the one kept current; the earlier one says it was replaced
+    q = await harness.press(other, f"pj:{pid}:announce")
+    assert q.answers[-1][0] == "📣 Announcement posted."
+    with session_scope() as s:
+        second = project_service.get_project(s, pid).announcement_message_id
+    assert second != first and bot.messages[(GROUP.id, first)]["text"] == OUTDATED_ANNOUNCEMENT
+    await harness.press(other, f"pj:{pid}:asg:WORKING_FILE:{other.id}")
+    assert (await folder_line("• Working File / Fonts")).endswith("👤 Olga Other")
+    assert bot.messages[(GROUP.id, first)]["text"] == OUTDATED_ANNOUNCEMENT
+
+    # deleted by a group admin: forgotten, nothing is posted in its place
+    del bot.messages[(GROUP.id, second)]
+    posts = posted_to_group()
+    await harness.press(other, f"pj:{pid}:asg:WORKING_FILE:{other.id}")
+    await flush_announcement_refreshes(ctx)
+    with session_scope() as s:
+        assert project_service.get_project(s, pid).announcement_message_id is None
+    assert posted_to_group() == posts
+    await harness.press(other, f"pj:{pid}:asg:WORKING_FILE:{other.id}")  # nothing to edit, nothing breaks
+    await harness.press(other, f"pj:{pid}:announce")
+    with session_scope() as s:
+        third = project_service.get_project(s, pid).announcement_message_id
+    assert third is not None and (await folder_line("• Working File / Fonts")).endswith("👤 Olga Other")
+
+    # linking another MG Group forgets it: the old chat is never edited again
+    await harness.press(other, f"pj:{pid}:grp:none")
+    with session_scope() as s:
+        assert project_service.get_project(s, pid).announcement_message_id is None
+    edits = len(bot.edited)
+    await harness.press(other, f"pj:{pid}:asg:WORKING_FILE:{other.id}")
+    await flush_announcement_refreshes(ctx)
+    assert [e for e in bot.edited[edits:] if e["chat_id"] == GROUP.id] == []
+    # a cancelled project's announcement is left as it is
+    await harness.press(other, f"pj:{pid}:grp:{GROUP.id}")
+    await harness.press(other, f"pj:{pid}:announce")
+    await harness.press(other, f"pj:{pid}:revoke")
+    await harness.press(other, f"pj:{pid}:revoke2")
+    await flush_announcement_refreshes(ctx)
+    edits = len(bot.edited)
+    with session_scope() as s:
+        p = project_service.get_project(s, pid)
+        project_service.toggle_assignment(s, p, other.id, AssetCategory.TIMELINE)
+        s.commit()
+    assert await refresh_announcement(ctx, pid) is False
+    assert [e for e in bot.edited[edits:] if "New archive" in e["text"]] == []
+
+
+@pytest.mark.asyncio
+async def test_announcement_edits_wait_for_a_pause_and_never_hold_up_the_buttons(harness, authorised_group, drive):
+    """Ticking people one after another becomes one edit of the group message, made in the background."""
+    import asyncio
+
+    from mg_archive_bot.bot.actions import flush_announcement_refreshes
+
+    bot = harness.bot
+    ctx = harness.ctx(LEAD)
+    olga = FakeUser(3003, "Olga", "Other", username="olga")
+    with session_scope() as s:
+        user_service.register_designer(s, olga.id, olga.full_name, olga.username)
+    await run_wizard(harness)
+    with session_scope() as s:
+        p = project_service.list_projects(s)[0]
+        pid, message_id = p.id, p.announcement_message_id
+    harness.bot_data["announcement_delay"] = 0.2
+    real_edit = bot.edit_message_text
+    started: list[float] = []
+
+    async def slow_edit(*args, **kwargs):  # a busy group: Telegram's limit makes edits wait
+        started.append(asyncio.get_running_loop().time())
+        await asyncio.sleep(0.3)
+        return await real_edit(*args, **kwargs)
+
+    bot.edit_message_text = slow_edit
+    loop = asyncio.get_running_loop()
+    begun = loop.time()
+    for user in (LEAD, olga):
+        q = await harness.press(LEAD, f"pj:{pid}:asg:CONTIN_VIDEOS:{user.id}")
+        assert q.answers[-1][0] == "Assigned"
+    await harness.press(LEAD, f"pj:{pid}:dt:PSD")
+    handled = loop.time() - begun
+    assert handled < 0.2 and started == []  # the buttons answered at once; nothing waited for the group
+    assert len([t for t in harness.bot_data["announcement_tasks"] if not t.done()]) == 1  # one refresh waits for all three
+    await flush_announcement_refreshes(ctx)
+    edits = [e for e in bot.edited if e["message_id"] == message_id]
+    assert len(edits) == 1  # three changes, one edit
+    text = _plain(edits[0]["text"])
+    assert "Contin Videos / ProRes 4444 — open  👤 Dee Signer, Lee Lead, Olga Other" in text and "Working File / PSD" in text
+    # a change made while an edit is under way is not lost: it gets an edit of its own
+    await harness.press(LEAD, f"pj:{pid}:asg:CONTIN_VIDEOS:{olga.id}")
+    await asyncio.sleep(0.25)  # the refresh is now waiting for Telegram
+    await harness.press(LEAD, f"pj:{pid}:asg:CONTIN_VIDEOS:{LEAD.id}")
+    await flush_announcement_refreshes(ctx)
+    final = _plain(bot.messages[(GROUP.id, message_id)]["text"])
+    assert "Contin Videos / ProRes 4444 — open  👤 Dee Signer\n" in final + "\n"
+
+
+@pytest.mark.asyncio
+async def test_announcement_posts_and_edits_never_cross(harness, authorised_group, drive):
+    import asyncio
+
+    from mg_archive_bot.bot.actions import OUTDATED_ANNOUNCEMENT, flush_announcement_refreshes, schedule_announcement_refresh
+
+    bot = harness.bot
+    ctx = harness.ctx(LEAD)
+    await run_wizard(harness)
+    with session_scope() as s:
+        pid = project_service.list_projects(s)[0].id
+    real_send, real_edit = bot.send_message, bot.edit_message_text
+
+    async def slow_send(*args, **kwargs):
+        await asyncio.sleep(0.05)
+        return await real_send(*args, **kwargs)
+
+    async def slow_edit(text, *args, **kwargs):
+        await asyncio.sleep(0.15 if "New archive" in text else 0.05)  # a full announcement is slower to edit
+        return await real_edit(text, *args, **kwargs)
+
+    bot.send_message, bot.edit_message_text = slow_send, slow_edit
+
+    def announcements() -> list[str]:
+        return [m["text"] for (chat, _), m in bot.messages.items() if chat == GROUP.id and ("New archive" in m["text"] or m["text"] == OUTDATED_ANNOUNCEMENT)]
+
+    # a double tap on Announce: two copies, and the first one says it was replaced
+    await asyncio.gather(harness.press(LEAD, f"pj:{pid}:announce"), harness.press(LEAD, f"pj:{pid}:announce"))
+    current = [t for t in announcements() if t != OUTDATED_ANNOUNCEMENT]
+    assert len(current) == 1 and announcements().count(OUTDATED_ANNOUNCEMENT) == 2
+    # a check that was about to edit while Announce posts: it edits the new copy, never the replaced one
+    with session_scope() as s:
+        p = project_service.get_project(s, pid)
+        project_service.toggle_assignment(s, p, LEAD.id, AssetCategory.TIMELINE)
+        s.commit()
+    schedule_announcement_refresh(ctx, pid)
+    await harness.press(LEAD, f"pj:{pid}:announce")
+    await flush_announcement_refreshes(ctx)
+    current = [t for t in announcements() if t != OUTDATED_ANNOUNCEMENT]
+    assert len(current) == 1 and "Timeline / ProRes 4444 — open  👤 Dee Signer, Lee Lead" in _plain(current[0])
+    with session_scope() as s:
+        tracked = project_service.get_project(s, pid).announcement_message_id
+    assert bot.messages[(GROUP.id, tracked)]["text"] == current[0]
+    # a failure reported for an older copy never makes the bot forget the current one
+    from mg_archive_bot.bot.actions import _forget_announcement
+
+    _forget_announcement(pid, tracked - 1)
+    with session_scope() as s:
+        assert project_service.get_project(s, pid).announcement_message_id == tracked
+    _forget_announcement(pid, tracked)
+    with session_scope() as s:
+        assert project_service.get_project(s, pid).announcement_message_id is None
+
+
+@pytest.mark.asyncio
+async def test_announcement_is_forgotten_when_the_group_is_migrated(harness, authorised_group, drive):
+    from telegram.error import ChatMigrated
+
+    from mg_archive_bot.bot.actions import flush_announcement_refreshes
+    from mg_archive_bot.services import groups as groups_service
+
+    bot = harness.bot
+    ctx = harness.ctx(LEAD)
+    await run_wizard(harness)
+    await run_wizard(harness, name="Second")
+    with session_scope() as s:
+        ids = [p.id for p in project_service.list_projects(s)]
+        assert all(project_service.get_project(s, i).announcement_message_id for i in ids)
+    # Telegram reports the move when the bot edits: the group is moved and the message forgotten
+    real_edit = bot.edit_message_text
+
+    async def migrated(*args, **kwargs):
+        raise ChatMigrated(-100777)
+
+    bot.edit_message_text = migrated
+    await harness.press(LEAD, f"pj:{ids[0]}:asg:TIMELINE:{LEAD.id}")
+    await flush_announcement_refreshes(ctx)
+    bot.edit_message_text = real_edit
+    with session_scope() as s:
+        first = project_service.get_project(s, ids[0])
+        assert first.announcement_message_id is None and first.mg_group_chat_id == -100777
+        assert groups_service.is_group_authorised(s, -100777)
+    # the move recorded another way (Telegram's service message) forgets every project's announcement
+    with session_scope() as s:
+        assert project_service.get_project(s, ids[1]).announcement_message_id is None  # moved with the group above
+        project_service.get_project(s, ids[1]).announcement_message_id = 12345
+        s.commit()
+        groups_service.migrate_group(s, -100777, -100888)
+        s.commit()
+        second = project_service.get_project(s, ids[1])
+        assert second.mg_group_chat_id == -100888 and second.announcement_message_id is None and second.announcement_message_hash is None
+    edits = len(bot.edited)
+    await harness.press(LEAD, f"pj:{ids[1]}:asg:TIMELINE:{LEAD.id}")
+    await flush_announcement_refreshes(ctx)
+    assert bot.edited[edits:] == []  # nothing in the new group is touched
+
+
+@pytest.mark.asyncio
+async def test_who_archives_what_screens_stay_within_telegram_limits(harness, authorised_group, drive):
+    many = [FakeUser(7000 + i, f"Designer number {i:02d} with a long name", "X" * 10) for i in range(40)]
+    with session_scope() as s:
+        for user in many:
+            user_service.register_designer(s, user.id, user.full_name, None)
+    await harness.command(LEAD, "/newproject")
+    await harness.press(LEAD, "nw:col:none")
+    await harness.text(LEAD, "Crowded")
+    for part in ("CONTIN_VIDEOS", "CONTIN_LYRICS", "TITLEBARS", "PSD"):
+        await harness.press(LEAD, f"nw:decl:{part}")
+    await harness.press(LEAD, "nw:decl:done")
+    await harness.press(LEAD, f"nw:grp:{GROUP.id}")
+    await harness.press(LEAD, "nw:meta:skip")
+    with session_scope() as s:
+        draft = [p for p in project_service.stale_drafts(s, LEAD.id) if p.name == "Crowded"][0]
+        for part in project_service.assignable_parts(draft):
+            for user in many:
+                project_service.toggle_assignment(s, draft, user.id, part)
+        s.commit()
+    q = await harness.press(LEAD, "nw:asg:parts")
+    text = q.edits[-1]["text"]
+    assert len(text) <= 4096 and "+25 more" in text
+    first_line = text.split("<b>So far</b>\n")[1].splitlines()[0]
+    assert first_line.count("Designer number") == 15 and "number 14" in first_line and "number 15" not in first_line
+    q = await harness.press(LEAD, "nw:asg:done")
+    assert "Ready to create" in q.edits[-1]["text"] and len(q.edits[-1]["text"]) <= 4096
+    await harness.command(LEAD, "/cancel")
+
+
+@pytest.mark.asyncio
+async def test_people_on_a_switched_off_asset_are_not_listed_as_assigned(harness, authorised_group, drive):
+    from mg_archive_bot.bot.actions import flush_announcement_refreshes
+
+    bot = harness.bot
+    await run_wizard(harness)  # Dee Signer on All assets
+    with session_scope() as s:
+        pid = project_service.list_projects(s)[0].id
+    await harness.press(LEAD, f"pj:{pid}:dt:TITLEBARS")
+    await harness.press(LEAD, f"pj:{pid}:asg:TITLEBARS:{ADMIN.id}")
+    await flush_announcement_refreshes(harness.ctx(LEAD))
+    with session_scope() as s:
+        message_id = project_service.get_project(s, pid).announcement_message_id
+    assert "Assigned: Boss, Dee Signer" in _plain(bot.messages[(GROUP.id, message_id)]["text"])
+    await harness.press(LEAD, f"pj:{pid}:dt:TITLEBARS")  # switched off again
+    await flush_announcement_refreshes(harness.ctx(LEAD))
+    assert "Assigned: Dee Signer" in _plain(bot.messages[(GROUP.id, message_id)]["text"])
+    q = await harness.press(LEAD, f"pj:{pid}:details")
+    assert "Boss" not in q.edits[-1]["text"].split("<b>Assigned:</b>")[1].split("\n")[0]
+    with session_scope() as s:
+        p = project_service.get_project(s, pid)
+        assert (AssetCategory.TITLEBARS, ADMIN.id) in {(a.category, a.user_id) for a in p.assignments}  # kept, not shown
+    await harness.press(LEAD, f"pj:{pid}:dt:TITLEBARS")  # on again: Boss is back where he was
+    await flush_announcement_refreshes(harness.ctx(LEAD))
+    assert "Assigned: Boss, Dee Signer" in _plain(bot.messages[(GROUP.id, message_id)]["text"])
+
+
+@pytest.mark.asyncio
+async def test_no_database_connection_is_held_while_waiting_for_the_group(harness, authorised_group, drive):
+    """Group messages queue behind Telegram's per-group limit; waiting must never hold a database connection."""
+    from mg_archive_bot import db
+    from mg_archive_bot.bot.actions import flush_announcement_refreshes
+
+    bot = harness.bot
+    real_send, real_edit = bot.send_message, bot.edit_message_text
+    held: list[tuple[str, int]] = []
+
+    async def send(chat_id, text, *args, **kwargs):
+        if chat_id == GROUP.id:
+            held.append(("send", db.get_session_factory().kw["bind"].pool.checkedout()))
+        return await real_send(chat_id, text, *args, **kwargs)
+
+    async def edit(text, *args, **kwargs):
+        held.append(("edit", db.get_session_factory().kw["bind"].pool.checkedout()))
+        return await real_edit(text, *args, **kwargs)
+
+    bot.send_message, bot.edit_message_text = send, edit
+    await run_wizard(harness)  # the announcement is posted at the end of the wizard
+    with session_scope() as s:
+        pid = project_service.list_projects(s)[0].id
+    await harness.press(LEAD, f"pj:{pid}:announce")  # posts again and marks the first copy replaced
+    await harness.press(LEAD, f"pj:{pid}:asg:TIMELINE:{LEAD.id}")
+    await flush_announcement_refreshes(harness.ctx(LEAD))
+    kinds = [k for k, _ in held]
+    assert kinds.count("send") >= 2 and kinds.count("edit") >= 2
+    assert held and all(n == 0 for _, n in held), held
+    # presses waiting for their turn (another post or edit of the same announcement is under way) hold nothing either
+    import asyncio
+
+    from mg_archive_bot.bot.actions import _announcement_lock
+
+    lock = _announcement_lock(harness.ctx(LEAD), pid)
+    await lock.acquire()
+    try:
+        waiting = [asyncio.create_task(harness.press(LEAD, f"pj:{pid}:announce")) for _ in range(3)]
+        await asyncio.sleep(0.05)
+        assert not any(t.done() for t in waiting)
+        assert db.get_session_factory().kw["bind"].pool.checkedout() == 0
+    finally:
+        lock.release()
+    await asyncio.gather(*waiting)
+
+
+@pytest.mark.asyncio
+async def test_a_saved_change_reaches_the_announcement_even_if_the_button_answer_fails(harness, authorised_group, drive):
+    """Telegram refuses answers to old button presses; the change was saved, so the announcement must follow."""
+    from telegram.error import BadRequest
+
+    from mg_archive_bot.bot.actions import flush_announcement_refreshes
+    from tests.fakes import FakeCallbackQuery
+
+    bot = harness.bot
+    other = FakeUser(2002, "Olga", "Other", username="olga")
+    with session_scope() as s:
+        user_service.register_designer(s, other.id, other.full_name, other.username)
+        user_service.set_role(s, other.id, Role.TEAM_LEAD, SUPER_ADMIN_ID)
+    await run_wizard(harness)
+    with session_scope() as s:
+        p = project_service.list_projects(s)[0]
+        pid, message_id = p.id, p.announcement_message_id
+    real_answer = FakeCallbackQuery.answer
+
+    async def too_old(self, *args, **kwargs):
+        raise BadRequest("Query is too old and response timeout expired or query id is invalid")
+
+    # each press on its own, so one press's update cannot cover for another's
+    for data, expected in (
+        (f"pj:{pid}:asg:TIMELINE:{LEAD.id}", "Timeline / ProRes 4444 — open  👤 Dee Signer, Lee Lead"),
+        (f"pj:{pid}:dt:PSD", "Working File / PSD"),
+        (f"pj:{pid}:setlead:{other.id}", "Lead: Olga Other"),
+    ):
+        FakeCallbackQuery.answer = too_old
+        try:
+            with pytest.raises(BadRequest):
+                await harness.press(LEAD, data)
+        finally:
+            FakeCallbackQuery.answer = real_answer
+        await flush_announcement_refreshes(harness.ctx(LEAD))
+        assert expected in _plain(bot.messages[(GROUP.id, message_id)]["text"]), data

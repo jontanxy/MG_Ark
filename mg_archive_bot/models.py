@@ -186,6 +186,10 @@ class Project(Base):
     # The single "live" progress message in the MG Group, edited in place by scans (see actions.refresh_live_status).
     status_message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     status_message_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # The announcement ("New archive: …") in the MG Group, edited in place when what it shows changes
+    # (who archives which part, declared folders, lead, name). See actions.refresh_announcement.
+    announcement_message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    announcement_message_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     tags: Mapped[list[Tag]] = relationship(Tag, secondary="project_tags", lazy="selectin", order_by=Tag.name)
     collection_folder: Mapped[Collection | None] = relationship(Collection, lazy="joined")

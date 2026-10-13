@@ -593,3 +593,24 @@ def test_password_hash_uses_owasp_scrypt_cost(monkeypatch):
     algo, n, r, p, *_ = stored.split("$")
     assert (algo, int(n), int(r), int(p)) == ("scrypt", 16384, 8, 5)
     assert security.verify_password("A real passphrase 2026", stored)
+
+
+@pytest.mark.asyncio
+async def test_pending_announcement_edits_are_sent_before_the_bot_disconnects(settings, drive, db):
+    """post_stop runs while the bot can still reach Telegram; post_shutdown runs after it has disconnected."""
+    import asyncio
+
+    from mg_archive_bot.bot import app as app_module
+
+    application = app_module.build_application(settings, drive)
+    assert application.post_stop is app_module._post_stop
+    done: list[str] = []
+
+    async def pending_edit() -> None:
+        await asyncio.sleep(0.05)
+        done.append("edited")
+
+    task = asyncio.create_task(pending_edit())
+    application.bot_data.setdefault("announcement_tasks", set()).add(task)
+    await app_module._post_stop(application)
+    assert done == ["edited"]

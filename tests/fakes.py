@@ -218,6 +218,7 @@ class BotHarness:
         self.bot = FakeBot()
         self.sheets = InMemorySheetsClient()
         self.bot_data = {"settings": settings, "drive": drive, "sheets": self.sheets, "tz": tz or ZoneInfo(settings.timezone or "UTC")}
+        self.bot_data["announcement_delay"] = 0  # announcement refreshes run as soon as the test lets the loop run
         self.user_data: dict[int, dict] = {}
         app = Application.builder().token("123:TEST").build()
         register_handlers(app)

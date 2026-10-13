@@ -48,9 +48,11 @@ from ..actions import (
     check_project,
     may_list_files,
     notify_user,
+    post_announcement,
     post_to_group,
     project_file_listing,
     rebuild_sheet,
+    schedule_announcement_refresh,
     refresh_live_status_from_latest,
     schedule_sheet_sync,
     sheet_location,
@@ -337,33 +339,58 @@ async def handle_wizard_meta(update: Update, context: ContextTypes.DEFAULT_TYPE,
         await _wizard_assign_step(update, context, session, project)
 
 
+MARKER_LEGEND = "<i>★ = Team Lead, 👁️‍🗨️ = Super Admin.</i>"
+
+
+def _overview_text(project: Project) -> str:
+    lines = notifications.assignment_overview(project)
+    return "\n".join(lines) if lines else "<i>Nobody assigned yet.</i>"
+
+
 async def _wizard_assign_step(update: Update, context: ContextTypes.DEFAULT_TYPE, session: Session, project: Project) -> None:
-    users = user_service.list_assignable_users(session)
-    selected = {a.user_id for a in project.assignments if a.category == AssetCategory.ALL}
-    text = "👥 Who is working on this project? Toggle designers, then Done.\n<i>★ = Team Lead, 👁️‍🗨️ = Super Admin. Per-folder assignments can be refined later from the project menu.</i>"
-    kb = user_toggle_keyboard(users, selected, "nw:asg", "nw:asg:done")
+    """Who archives what: one button per part (all assets, working files, each declared asset), then Continue."""
+    text = (
+        "👥 <b>Who archives what?</b>\n"
+        "Pick a part, tick the people for it, then come back here. “All assets” covers every folder.\n\n"
+        f"<b>So far</b>\n{_overview_text(project)}"
+    )
+    text = clip_message(text)
+    kb = assign_category_keyboard(project, prefix="nw:asgcat", footer=("Continue ➡️", "nw:asg:done"))
     if update.callback_query is not None:
         await safe_edit(update, text, kb)
     else:
         await update.message.reply_text(text, reply_markup=kb)
 
 
+def _wizard_people_keyboard(session: Session, project: Project, category: AssetCategory):
+    users = user_service.list_assignable_users(session)
+    selected = {a.user_id for a in project.assignments if a.category == category}
+    return user_toggle_keyboard(users, selected, f"nw:asg:{category.value}", "nw:asg:parts", done_text="◀️ Done")
+
+
+async def _wizard_people_step(update: Update, session: Session, project: Project, category: AssetCategory) -> None:
+    await safe_edit(
+        update,
+        f"👥 Who archives <b>{esc(CATEGORY_LABELS[category])}</b>? Tick the people, then Done.\n{MARKER_LEGEND}",
+        _wizard_people_keyboard(session, project, category),
+    )
+
+
 async def _wizard_summary(update: Update, context: ContextTypes.DEFAULT_TYPE, session: Session, project: Project, note: str = "") -> None:
     declared = [CATEGORY_LABELS[c] for c in project_service.declared_categories(project)]
     group = group_service.get_group(session, project.mg_group_chat_id) if project.mg_group_chat_id else None
-    who = project_service.assignees_for(project, None)
     lines = [
         note + f"📋 <b>Ready to create: {esc(project.full_name)}</b>",
         "",
         f"<b>Lead:</b> {esc(project.lead.display_name) if project.lead is not None else '—'}",
         f"<b>Declared assets:</b> {esc(', '.join(declared) if declared else 'Working files only')}",
         f"<b>MG Group:</b> {esc(group.title) if group else 'none — nothing will be announced'}",
-        f"<b>Assigned:</b> {esc(', '.join(u.display_name for u in who) if who else 'nobody yet')}",
+        f"<b>Who archives what:</b>\n{_overview_text(project)}",
         f"<b>Tags:</b> {esc(', '.join(project.tag_names) if project.tags else '—')}",
         "",
         "Creating the archive makes the full folder tree on Google Drive and posts the announcement to the MG Group.",
     ]
-    await safe_edit(update, "\n".join(lines), confirm_keyboard("nw:confirm", "nw:cancel"))
+    await safe_edit(update, clip_message("\n".join(lines)), confirm_keyboard("nw:confirm", "nw:cancel"))
 
 
 async def _wizard_create(update: Update, context: ContextTypes.DEFAULT_TYPE, session: Session, project: Project, actor: User) -> None:
@@ -388,7 +415,7 @@ async def _wizard_create(update: Update, context: ContextTypes.DEFAULT_TYPE, ses
         session.commit()
     context.user_data.pop("wizard", None)
     schedule_sheet_sync(context, project.id)
-    posted = await post_to_group(context, project.mg_group_chat_id, notifications.announcement(project, tree_of(context)))
+    posted = await post_announcement(context, session, project)
     note = "✅ <b>Archive created.</b> "
     if project.mg_group_chat_id and not posted:
         note += "⚠️ I couldn't post the announcement to the MG Group (am I still a member?). "
@@ -466,21 +493,28 @@ async def wizard_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, ac
                 await _ask_wizard_meta(update, context, 0)
             else:
                 await _wizard_assign_step(update, context, session, project)
+        elif step == "asgcat":  # a part was chosen: who archives it?
+            category = parse_enum(AssetCategory, arg)
+            if category is None or category not in project_service.assignable_parts(project):
+                return  # malformed button data, or a part this project does not have: ignore
+            await _wizard_people_step(update, session, project, category)
         elif step == "asg":
             if arg == "done":
                 await _wizard_summary(update, context, session, project)
+            elif arg == "parts":
+                await _wizard_assign_step(update, context, session, project)
             else:
-                user_id = parse_int(arg)
-                if user_id is None:
+                # nw:asg:<part>:<user>; a bare nw:asg:<user> comes from a keyboard sent before parts existed
+                category = parse_enum(AssetCategory, arg) if len(parts) > 3 else AssetCategory.ALL
+                user_id = parse_int(parts[3] if len(parts) > 3 else arg)
+                if category is None or user_id is None or category not in project_service.assignable_parts(project):
                     return  # malformed button data: ignore
                 try:
-                    project_service.toggle_assignment(session, project, user_id, AssetCategory.ALL)
+                    project_service.toggle_assignment(session, project, user_id, category)
                 except ProjectError:
                     return
                 session.commit()
-                users = user_service.list_assignable_users(session)
-                selected = {a.user_id for a in project.assignments if a.category == AssetCategory.ALL}
-                await query.edit_message_reply_markup(user_toggle_keyboard(users, selected, "nw:asg", "nw:asg:done"))
+                await query.edit_message_reply_markup(_wizard_people_keyboard(session, project, category))
         elif step == "confirm":
             await _wizard_create(update, context, session, project, actor)
         elif step == "cancel":
@@ -574,6 +608,7 @@ async def handle_rename(update: Update, context: ContextTypes.DEFAULT_TYPE, acto
             _close_prompt(context, prompt)
         schedule_sheet_sync(context, project.id)
         await refresh_live_status_from_latest(context, session, project)
+        schedule_announcement_refresh(context, project.id)
         await post_to_group(context, project.mg_group_chat_id, notifications.renamed_message(old, project))
         await update.message.reply_text(
             f"✅ Renamed <b>{esc(old)}</b> → <b>{esc(project.full_name)}</b>.\n\n" + _menu_text(session, project, context),
@@ -672,6 +707,7 @@ async def _move_project(
             _close_prompt(context, prompt)
     schedule_sheet_sync(context, project.id)
     await refresh_live_status_from_latest(context, session, project)
+    schedule_announcement_refresh(context, project.id)
     await post_to_group(context, project.mg_group_chat_id, notifications.moved_message(old_collection, project))
     log.info("Project %s (%s) is now %s, moved by %s", project.id, old_display, project.full_name, actor.telegram_id)
     if project.collection_folder is None:
@@ -796,6 +832,7 @@ async def project_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, a
                 return
             session.commit()
             schedule_sheet_sync(context, project.id)
+            schedule_announcement_refresh(context, project.id)
             await query.answer(f"Lead: {lead.display_name}")
             if lead.telegram_id != actor.telegram_id:
                 await notify_user(context, lead.telegram_id, f"👑 You are now the lead of <b>{esc(project.full_name)}</b>. Open /projects to manage it.")
@@ -820,7 +857,7 @@ async def project_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, a
             if not project.mg_group_chat_id:
                 await query.answer("Link an MG Group first (💬 MG group).", show_alert=True)
                 return
-            ok = await post_to_group(context, project.mg_group_chat_id, notifications.announcement(project, tree_of(context)))
+            ok = await post_announcement(context, session, project)
             await query.answer("📣 Announcement posted." if ok else "Could not post — is the bot still in the group?", show_alert=not ok)
 
         elif action == "remind":
@@ -844,7 +881,14 @@ async def project_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, a
 
         elif action == "assign":
             await query.answer()
-            await safe_edit(update, f"👥 <b>{esc(project.full_name)}</b> — assign designers\nPick what to assign for. “All assets” covers every folder.", assign_category_keyboard(project))
+            await safe_edit(
+                update,
+                clip_message(
+                    f"👥 <b>{esc(project.full_name)}</b> — who archives what\nPick a part to change who archives it. “All assets” covers every folder.\n\n"
+                    f"<b>So far</b>\n{_overview_text(project)}"
+                ),
+                assign_category_keyboard(project),
+            )
 
         elif action == "asgcat":
             category = parse_enum(AssetCategory, args[0] if args else None)
@@ -867,6 +911,7 @@ async def project_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, a
                 return
             session.commit()
             schedule_sheet_sync(context, project.id)
+            schedule_announcement_refresh(context, project.id)
             await query.answer("Assigned" if now_on else "Unassigned")
             users = user_service.list_assignable_users(session)
             selected = {a.user_id for a in project.assignments if a.category == category}
@@ -972,6 +1017,7 @@ async def project_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, a
                         log.warning("ensure_folders failed: %s", exc)
                         toast, alert = f"Saved, but Drive folder creation failed: {exc}"[:190], True
             schedule_sheet_sync(context, project.id)
+            schedule_announcement_refresh(context, project.id)
             await query.answer(toast, show_alert=alert)
             await query.edit_message_reply_markup(declaration_keyboard(project, f"pj:{project.id}:dt", done_text="◀️ Back to project"))
 

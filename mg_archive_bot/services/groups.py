@@ -132,6 +132,9 @@ def migrate_group(session: Session, old_chat_id: int, new_chat_id: int) -> bool:
         moved = True
     for project in session.scalars(select(Project).where(Project.mg_group_chat_id == old_chat_id)):
         project.mg_group_chat_id = new_chat_id
+        # messages stay in the old basic group: the new chat's message ids are unrelated
+        project.announcement_message_id = None
+        project.announcement_message_hash = None
         moved = True
     stale = session.get(UnauthorisedChat, old_chat_id)
     if stale is not None:

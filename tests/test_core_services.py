@@ -1391,3 +1391,37 @@ async def test_names_are_compared_without_case_in_every_alphabet(db, settings, d
         s.commit()
         assert [c.name for c in collection_service.list_collections(s)] == ["Ärzte"]
         assert drive.path_of(song.drive_root_id) == "Archive Root/Ärzte/Song"
+
+
+@pytest.mark.asyncio
+async def test_who_archives_what_leaves_out_people_who_cannot_upload(db, settings, drive):
+    """Revoking a user or making them view-only removes their assignments; rows left by older versions are ignored."""
+    from mg_archive_bot.models import Assignment
+    from mg_archive_bot.services import notifications
+
+    with session_scope() as s:
+        for uid, name in ((11, "Ann"), (12, "Ben"), (13, "Cat")):
+            user_service.register_designer(s, uid, name, None)
+        p = project_service.create_draft(s, "Song", 1, "Lead", 2026)
+        for category in (AssetCategory.CONTIN_VIDEOS, AssetCategory.TITLEBARS):
+            project_service.set_declaration(s, p, category, True)
+        await project_service.provision_folders(s, p, drive, settings)
+        assert project_service.assignable_parts(p) == [AssetCategory.ALL, AssetCategory.WORKING_FILE, AssetCategory.CONTIN_VIDEOS, AssetCategory.TITLEBARS]
+        for uid in (11, 12, 13):
+            project_service.toggle_assignment(s, p, uid, AssetCategory.CONTIN_VIDEOS)
+        project_service.toggle_assignment(s, p, 12, AssetCategory.TITLEBARS)
+        s.commit()
+        assert notifications.assignment_overview(p) == ["• Contin Videos: Ann, Ben, Cat", "• Titlebars: Ben"]
+        # rows that an older version left behind for people who can no longer upload
+        from mg_archive_bot.models import User as models_User
+
+        ben, cat = s.get(models_User, 12), s.get(models_User, 13)
+        ben.status = UserStatus.REVOKED
+        cat.role = Role.LIGHTS
+        s.commit()
+        s.expire_all()
+        p = project_service.get_project(s, p.id)
+        assert len([a for a in p.assignments if isinstance(a, Assignment)]) == 4
+        assert [u.display_name for u in project_service.assigned_to_part(p, AssetCategory.CONTIN_VIDEOS)] == ["Ann"]
+        assert notifications.assignment_overview(p) == ["• Contin Videos: Ann"]
+        assert notifications.assignment_overview(project_service.create_draft(s, "Empty", 1, "Lead", 2026)) == []
