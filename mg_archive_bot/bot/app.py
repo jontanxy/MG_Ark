@@ -4,7 +4,7 @@ import logging
 from datetime import time
 from types import SimpleNamespace
 
-from telegram import BotCommand, BotCommandScopeAllGroupChats, BotCommandScopeAllPrivateChats, BotCommandScopeChat, LinkPreviewOptions, Update
+from telegram import BotCommandScopeAllGroupChats, BotCommandScopeAllPrivateChats, LinkPreviewOptions, Update
 from telegram.constants import ParseMode
 from telegram.error import TelegramError
 from telegram.ext import (
@@ -21,34 +21,11 @@ from telegram.ext import (
 from ..config import Settings
 from ..services.drive import DriveClient
 from ..util import resolve_tz
+from .commands import GROUP_COMMANDS, PRIVATE_COMMANDS, refresh_command_menus
 from .handlers import admin, auth, common, group_mode, mg_groups, projects, search, text_router
 from .jobs import PreviewWorker, leave_stale_chats_job, rebuild_sheet_job, refresh_group_titles_job, reminder_job, scan_job
 
 log = logging.getLogger(__name__)
-
-PRIVATE_COMMANDS = [
-    BotCommand("start", "Register / show the menu"),
-    BotCommand("search", "Search the archive (comma-separated terms)"),
-    BotCommand("projects", "Manage archives (Team Lead)"),
-    BotCommand("newproject", "Create a new archive (Team Lead)"),
-    BotCommand("creategroup", "Token to authorise an MG Group (Team Lead)"),
-    BotCommand("sheet", "Link to the project index sheet (Team Lead)"),
-    BotCommand("whoami", "Show your role"),
-    BotCommand("cancel", "Abort the current step"),
-    BotCommand("help", "Show help"),
-]
-ADMIN_COMMANDS = PRIVATE_COMMANDS + [
-    BotCommand("users", "Manage users (Super Admin)"),
-    BotCommand("groups", "Manage MG Groups (Super Admin)"),
-    BotCommand("setpassword", "Change the access password (Super Admin)"),
-]
-GROUP_COMMANDS = [
-    BotCommand("status", "Archive progress for this group"),
-    BotCommand("files", "List the files uploaded for this group's archives"),
-    BotCommand("remind", "Post reminders for missing uploads (Team Lead)"),
-    BotCommand("activate", "Authorise this group with a token (Team Lead)"),
-    BotCommand("help", "Show group commands"),
-]
 
 
 async def _post_init(application: Application) -> None:
@@ -59,7 +36,8 @@ async def _post_init(application: Application) -> None:
     try:
         await application.bot.set_my_commands(PRIVATE_COMMANDS, scope=BotCommandScopeAllPrivateChats())
         await application.bot.set_my_commands(GROUP_COMMANDS, scope=BotCommandScopeAllGroupChats())
-        await application.bot.set_my_commands(ADMIN_COMMANDS, scope=BotCommandScopeChat(chat_id=settings.super_admin_telegram_id))
+        applied = await refresh_command_menus(application.bot, settings.super_admin_telegram_id)
+        log.info("Command menus set for %d user(s)", applied)
     except TelegramError as exc:
         log.warning("Could not register bot commands: %s", exc)
     me = await application.bot.get_me()

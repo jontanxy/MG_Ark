@@ -798,9 +798,34 @@ directing the user to a private chat, which is what keeps the shared channel rea
 | `/help` | None | List the group commands |
 {widths:26,18,56}
 
-Command lists are registered with Telegram at three scopes, so each person sees an appropriate menu: all
-private chats, all group chats, and a private scope for the Super Admin that additionally exposes the three
-administrative commands.
+### Per-role command menus
+
+Telegram stores a command list per *scope* and serves the most specific scope matching a chat. It knows
+nothing of this application's roles, but a private chat's id is the user's id, so pushing a list to that
+chat's scope is how a role becomes a menu.
+
+Two broad scopes are registered at startup: a viewer list for all private chats, which is what a stranger
+and a newly registered Designer see, and the group list for all group chats. On top of those, every active
+user receives a list chosen from their role.
+
+| Role | Private menu |
+|---|---|
+| Lights, Designer | `/start`, `/search`, `/whoami`, `/cancel`, `/help` |
+| Team Lead | those plus `/newproject`, `/projects`, `/creategroup`, `/sheet` |
+| Super Admin | those plus `/users`, `/groups`, `/setpassword` |
+{widths:22,78}
+
+Lights and Designers share a menu because the Lights restriction applies to what a search result offers and
+to `/files` in a group, not to which commands exist in a private chat.
+
+Because Telegram caches the list rather than asking for it, a menu only changes when something pushes it.
+The push therefore happens at registration, when the Super Admin changes somebody's role, and for every
+active user at startup, which is what applies a change made while the bot was stopped. A failed push is
+logged and ignored: the consequence is a stale menu, not a loss of function, and the next start repairs it.
+
+None of this is an access control. Authorisation is enforced by the `require` decorator on every handler,
+and a command typed by hand is refused exactly as before. The menu simply stops advertising commands the
+person cannot use.
 
 ## The creation wizard
 

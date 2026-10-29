@@ -12,6 +12,7 @@ from ...services import users as user_service
 from ...util import esc
 from ..access import clear_prompt, is_private, may_reply_to_unregistered, password_breaker, resolve_actor, set_prompt, settings_of
 from ..actions import notify_user
+from ..commands import apply_user_commands
 from ..keyboards import new_user_keyboard
 from .common import help_text
 
@@ -100,6 +101,7 @@ async def handle_password(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             + help_text(registered, private=True),
         )
         log.info("Registered user %s (%s)", tg_user.id, tg_user.full_name)
+        await apply_user_commands(context.bot, tg_user.id, registered.role)
         if tg_user.id != settings.super_admin_telegram_id:
             handle = f" (@{esc(tg_user.username)})" if tg_user.username else ""
             try:

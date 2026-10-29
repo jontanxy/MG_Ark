@@ -13,6 +13,7 @@ from ...services import groups as group_service
 from ...services import users as user_service
 from ...util import esc, fmt_dt
 from ..access import clear_prompt, require, safe_edit, set_prompt, settings_of
+from ..commands import apply_user_commands
 from ..keyboards import (
     confirm_revoke_group_keyboard,
     groups_list_keyboard,
@@ -129,6 +130,10 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, act
                 await query.answer(str(exc), show_alert=True)
                 return
             session.commit()
+            if user is not None and action in ("role", "restore"):
+                # The menu is cached by Telegram per chat, so a role change only reaches the person
+                # when it is pushed. Revocation is left alone: a revoked account is refused anyway.
+                await apply_user_commands(context.bot, user.telegram_id, user.role)
             await query.answer(toast)
             if user is None:
                 await safe_edit(update, "User not found.")
