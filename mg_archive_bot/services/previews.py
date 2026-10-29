@@ -82,6 +82,9 @@ def plan_previews(
     *,
     force: bool = False,
     orphans: list[PreviewOrphan] | None = None,
+    min_size: int = 0,
+    max_size: int | None = None,
+    max_jobs: int | None = None,
 ) -> list[PreviewJob]:
     """Create/refresh PENDING rows for new or changed ProRes sources; drop rows whose source vanished.
 
@@ -99,7 +102,12 @@ def plan_previews(
         for f in source_files.get(key, []):
             if not is_video(f):
                 continue
+            size = f.size or 0
+            if size < min_size or (max_size is not None and size > max_size):
+                continue  # junk-sized "videos" and absurdly large masters are never downloaded
             seen_ids.add(f.id)
+            if max_jobs is not None and len(jobs) >= max_jobs:
+                continue  # the rest is picked up by later scans
             row = existing.get(f.id)
             if row is None:
                 row = PreviewAsset(

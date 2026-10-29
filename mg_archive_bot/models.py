@@ -151,6 +151,7 @@ class Project(Base):
     has_timeline: Mapped[bool] = mapped_column(Boolean, default=False)
     has_contin_videos: Mapped[bool] = mapped_column(Boolean, default=False)
     has_contin_lyrics: Mapped[bool] = mapped_column(Boolean, default=False)
+    has_titlebars: Mapped[bool] = mapped_column(Boolean, default=False)
     has_psd: Mapped[bool] = mapped_column(Boolean, default=False)
 
     collection: Mapped[str] = mapped_column(String(200), default="")
@@ -164,6 +165,9 @@ class Project(Base):
     asset_types: Mapped[str] = mapped_column(String(200), default="")
 
     created_by: Mapped[int] = mapped_column(Integer, index=True)
+    # The one Team Lead responsible for this project (never the Super Admin). Nullable only for legacy rows
+    # and after the lead loses the Team Lead role; management is then limited to the Super Admin until reassigned.
+    lead_id: Mapped[int | None] = mapped_column(ForeignKey("users.telegram_id", ondelete="SET NULL"), nullable=True, index=True)
     mg_group_chat_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     collection_id: Mapped[int | None] = mapped_column(ForeignKey("collections.id", ondelete="SET NULL"), nullable=True, index=True)
     drive_root_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
@@ -182,9 +186,14 @@ class Project(Base):
     # The single "live" progress message in the MG Group, edited in place by scans (see actions.refresh_live_status).
     status_message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     status_message_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # The announcement ("New archive: …") in the MG Group, edited in place when what it shows changes
+    # (who archives which part, declared folders, lead, name). See actions.refresh_announcement.
+    announcement_message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    announcement_message_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     tags: Mapped[list[Tag]] = relationship(Tag, secondary="project_tags", lazy="selectin", order_by=Tag.name)
     collection_folder: Mapped[Collection | None] = relationship(Collection, lazy="joined")
+    lead: Mapped[User | None] = relationship(User, lazy="joined", foreign_keys=[lead_id])
     folders: Mapped[list[ProjectFolder]] = relationship(
         "ProjectFolder", back_populates="project", lazy="selectin", cascade="all, delete-orphan"
     )

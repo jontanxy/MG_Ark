@@ -53,19 +53,45 @@ def esc(value: object) -> str:
     return html.escape("" if value is None else str(value), quote=False)
 
 
-def normalise_terms(raw: str) -> list[str]:
-    """Split a comma-separated (fallback: whitespace) query into trimmed, lower-cased, unique terms."""
+MAX_TERMS = 50
+MAX_TERM_LENGTH = 100
+TELEGRAM_MESSAGE_LIMIT = 4096
+SAFE_MESSAGE_LIMIT = 4000
+
+
+def normalise_terms(raw: str, *, max_terms: int = MAX_TERMS, max_length: int = MAX_TERM_LENGTH) -> list[str]:
+    """Split a comma-separated (fallback: whitespace) query into trimmed, lower-cased, unique terms.
+
+    Bounded (``max_terms`` terms of at most ``max_length`` characters) so user input can never produce
+    oversized messages or unbounded tag lists.
+    """
     if not raw:
         return []
     parts = raw.split(",") if "," in raw else raw.split()
     seen: set[str] = set()
     out: list[str] = []
     for part in parts:
-        term = re.sub(r"\s+", " ", part).strip().lower().lstrip("#")
+        term = re.sub(r"\s+", " ", part).strip().lower().lstrip("#")[:max_length].strip()
         if term and term not in seen:
             seen.add(term)
             out.append(term)
+            if len(out) >= max_terms:
+                break
     return out
+
+
+def clip_message(text: str, limit: int = SAFE_MESSAGE_LIMIT) -> str:
+    """Keep a Telegram HTML message under the size limit by dropping whole trailing lines.
+
+    Our message builders never let an HTML tag span a line break, so cutting at a newline keeps the
+    markup valid. Only reached with adversarial or pathological content.
+    """
+    if len(text) <= limit:
+        return text
+    cut = text.rfind("\n", 0, limit - 2)
+    if cut <= 0:
+        cut = limit - 2
+    return text[:cut].rstrip() + "\n…"
 
 
 def human_size(num: int | None) -> str:

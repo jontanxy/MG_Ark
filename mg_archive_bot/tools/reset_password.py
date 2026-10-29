@@ -9,6 +9,7 @@ does not change the password. The Super Admin can also change it from Telegram w
 from __future__ import annotations
 
 import getpass
+import os
 import sys
 
 from pydantic import ValidationError
@@ -29,6 +30,7 @@ def reset(settings: Settings, password: str) -> None:
 
 
 def main(argv: list[str] | None = None, settings: Settings | None = None) -> int:
+    os.umask(0o077)
     args = sys.argv[1:] if argv is None else argv
     try:
         settings = settings or Settings()  # type: ignore[call-arg]

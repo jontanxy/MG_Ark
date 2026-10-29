@@ -13,7 +13,7 @@ from ...models import User
 from ...services import groups as group_service
 from ...services import users as user_service
 from ...util import esc
-from ..access import require, settings_of
+from ..access import limiter, require, settings_of
 
 log = logging.getLogger(__name__)
 
@@ -51,6 +51,8 @@ async def cmd_creategroup(update: Update, context: ContextTypes.DEFAULT_TYPE, ac
 async def cmd_activate(update: Update, context: ContextTypes.DEFAULT_TYPE, actor: User) -> None:
     chat = update.effective_chat
     raw = " ".join(context.args or [])
+    if not limiter(context, "activate", 5, 600).allow(actor.telegram_id):
+        return  # 5 attempts per 10 minutes per user; beyond that stay silent (no reply flood, no guessing)
     with session_scope() as session:
         if group_service.is_group_authorised(session, chat.id):
             await update.message.reply_text("✅ This group is already an authorised MG Group.")

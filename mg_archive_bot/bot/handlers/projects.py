@@ -4,11 +4,13 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from telegram import Update
 from telegram.ext import ContextTypes
 
 from ...constants import (
+    CATEGORY_FLAGS,
     CATEGORY_LABELS,
     METADATA_FIELDS,
     REVOCABLE_STATUSES,
@@ -19,7 +21,7 @@ from ...constants import (
     Role,
 )
 from ...db import session_scope
-from ...models import Project, User
+from ...models import Collection, Project, User
 from ...services import collections as collection_service
 from ...services import groups as group_service
 from ...services import notifications
@@ -28,13 +30,29 @@ from ...services import users as user_service
 from ...services.drive import DriveError
 from ...services.projects import ProjectError
 from ...services.validation import latest_report
-from ...util import esc
-from ..access import clear_prompt, drive_of, project_lock, require, safe_edit, set_prompt, settings_of
+from ...util import clip_message, esc
+from ..access import (
+    clear_prompt,
+    drive_of,
+    get_prompt,
+    parse_enum,
+    parse_int,
+    placement_lock,
+    project_lock,
+    require,
+    safe_edit,
+    set_prompt,
+    settings_of,
+)
 from ..actions import (
     check_project,
+    may_list_files,
+    notify_user,
+    post_announcement,
     post_to_group,
     project_file_listing,
     rebuild_sheet,
+    schedule_announcement_refresh,
     refresh_live_status_from_latest,
     schedule_sheet_sync,
     sheet_location,
@@ -42,14 +60,17 @@ from ..actions import (
     user_by_id,
 )
 from ..keyboards import (
+    MAX_COLLECTION_BUTTONS,
     assign_category_keyboard,
     collection_choice_keyboard,
+    collection_move_keyboard,
     back_to_project_keyboard,
     confirm_keyboard,
     confirm_revoke_keyboard,
     confirm_verify_keyboard,
     declaration_keyboard,
     group_choice_keyboard,
+    lead_choice_keyboard,
     metadata_field_keyboard,
     previews_keyboard,
     project_menu_keyboard,
@@ -81,6 +102,13 @@ def _tz(context: ContextTypes.DEFAULT_TYPE):
     return context.bot_data["tz"]
 
 
+MANAGE_ACTIONS = frozenset(
+    {"announce", "remind", "assign", "asgcat", "asg", "meta", "mf", "decl", "dt", "group", "grp", "prev",
+     "verify", "verify2", "revoke", "revoke2", "restore", "reopen", "lead", "setlead", "rename", "col", "setcol"}
+)
+NOT_LEAD = "Only this project's lead (or the Super Admin) can do that."
+
+
 def _menu_text(session: Session, project: Project, context: ContextTypes.DEFAULT_TYPE) -> str:
     report = latest_report(session, project)
     creator = user_by_id(session, project.created_by)
@@ -91,11 +119,14 @@ def _menu_text(session: Session, project: Project, context: ContextTypes.DEFAULT
         text += f"\n<b>MG Group:</b> {esc(group.title if group else project.mg_group_chat_id)}{state}"
     else:
         text += "\n<b>MG Group:</b> none linked"
-    return text
+    return clip_message(text)
 
 
-async def _show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, session: Session, project: Project, prefix: str = "") -> None:
-    await safe_edit(update, prefix + _menu_text(session, project, context), project_menu_keyboard(project))
+async def _show_menu(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, session: Session, project: Project, prefix: str = "", actor: User | None = None
+) -> None:
+    manage = actor is None or project_service.can_manage(actor, project)
+    await safe_edit(update, prefix + _menu_text(session, project, context), project_menu_keyboard(project, manage=manage))
 
 
 def _load_project(session: Session, project_id: int) -> Project | None:
@@ -133,15 +164,18 @@ async def cmd_projects(update: Update, context: ContextTypes.DEFAULT_TYPE, actor
 @require(Role.TEAM_LEAD)
 async def cmd_project(update: Update, context: ContextTypes.DEFAULT_TYPE, actor: User) -> None:
     args = context.args or []
-    if not args or not args[0].isdigit():
+    project_id = parse_int(args[0]) if args else None
+    if project_id is None:
         await update.message.reply_text("Usage: /project &lt;id&gt; — or use /projects to pick one.")
         return
     with session_scope() as session:
-        project = _load_project(session, int(args[0]))
+        project = _load_project(session, project_id)
         if project is None:
             await update.message.reply_text("Project not found.")
             return
-        await update.message.reply_text(_menu_text(session, project, context), reply_markup=project_menu_keyboard(project))
+        await update.message.reply_text(
+            _menu_text(session, project, context), reply_markup=project_menu_keyboard(project, manage=project_service.can_manage(actor, project))
+        )
 
 
 @require(Role.TEAM_LEAD)
@@ -189,9 +223,13 @@ async def handle_collection_name(update: Update, context: ContextTypes.DEFAULT_T
         return
     with session_scope() as session:
         try:
-            collection = collection_service.create_collection(session, update.message.text or "", actor.telegram_id)
+            name = project_service.validate_name(update.message.text or "")
+            if collection_service.find_by_name(session, name) is None and collection_service.taken_by_top_level_project(session, name):
+                raise ProjectError(collection_service.name_taken_message(name))
+            collection = collection_service.create_collection(session, name, actor.telegram_id)
         except ProjectError as exc:
-            await update.message.reply_text(f"❌ {esc(str(exc))}\nSend another collection name or /cancel.")
+            reason = str(exc).replace("Project name", "Collection name")
+            await update.message.reply_text(f"❌ {esc(reason)}\nSend another collection name or /cancel.")
             return
         session.commit()
         context.user_data.setdefault("wizard", {})["collection_id"] = collection.id
@@ -247,6 +285,17 @@ async def _wizard_group_step(update: Update, context: ContextTypes.DEFAULT_TYPE,
     await safe_edit(update, text, group_choice_keyboard(groups, "nw:grp"))
 
 
+async def _wizard_lead_step(update: Update, context: ContextTypes.DEFAULT_TYPE, session: Session, project: Project) -> None:
+    leads = project_service.eligible_leads(session)
+    if not leads:
+        project_service.delete_draft(session, project)
+        session.commit()
+        context.user_data.pop("wizard", None)
+        await safe_edit(update, "👑 Every project needs a Team Lead as its lead, and nobody holds that role yet. Promote someone in /users, then run /newproject again.")
+        return
+    await safe_edit(update, "👑 Who is the <b>project lead</b>? They manage this project and receive its notifications.", lead_choice_keyboard(leads, "nw:lead"))
+
+
 async def _wizard_meta_step(update: Update, context: ContextTypes.DEFAULT_TYPE, project: Project, note: str = "") -> None:
     await safe_edit(
         update,
@@ -290,37 +339,63 @@ async def handle_wizard_meta(update: Update, context: ContextTypes.DEFAULT_TYPE,
         await _wizard_assign_step(update, context, session, project)
 
 
+MARKER_LEGEND = "<i>★ = Team Lead, 👁️‍🗨️ = Super Admin.</i>"
+
+
+def _overview_text(project: Project) -> str:
+    lines = notifications.assignment_overview(project)
+    return "\n".join(lines) if lines else "<i>Nobody assigned yet.</i>"
+
+
 async def _wizard_assign_step(update: Update, context: ContextTypes.DEFAULT_TYPE, session: Session, project: Project) -> None:
-    users = user_service.list_assignable_users(session)
-    selected = {a.user_id for a in project.assignments if a.category == AssetCategory.ALL}
-    text = "👥 Who is working on this project? Toggle designers, then Done.\n<i>★ = Team Lead. Per-folder assignments can be refined later from the project menu.</i>"
-    kb = user_toggle_keyboard(users, selected, "nw:asg", "nw:asg:done")
+    """Who archives what: one button per part (all assets, working files, each declared asset), then Continue."""
+    text = (
+        "👥 <b>Who archives what?</b>\n"
+        "Pick a part, tick the people for it, then come back here. “All assets” covers every folder.\n\n"
+        f"<b>So far</b>\n{_overview_text(project)}"
+    )
+    text = clip_message(text)
+    kb = assign_category_keyboard(project, prefix="nw:asgcat", footer=("Continue ➡️", "nw:asg:done"))
     if update.callback_query is not None:
         await safe_edit(update, text, kb)
     else:
         await update.message.reply_text(text, reply_markup=kb)
 
 
+def _wizard_people_keyboard(session: Session, project: Project, category: AssetCategory):
+    users = user_service.list_assignable_users(session)
+    selected = {a.user_id for a in project.assignments if a.category == category}
+    return user_toggle_keyboard(users, selected, f"nw:asg:{category.value}", "nw:asg:parts", done_text="◀️ Done")
+
+
+async def _wizard_people_step(update: Update, session: Session, project: Project, category: AssetCategory) -> None:
+    await safe_edit(
+        update,
+        f"👥 Who archives <b>{esc(CATEGORY_LABELS[category])}</b>? Tick the people, then Done.\n{MARKER_LEGEND}",
+        _wizard_people_keyboard(session, project, category),
+    )
+
+
 async def _wizard_summary(update: Update, context: ContextTypes.DEFAULT_TYPE, session: Session, project: Project, note: str = "") -> None:
     declared = [CATEGORY_LABELS[c] for c in project_service.declared_categories(project)]
     group = group_service.get_group(session, project.mg_group_chat_id) if project.mg_group_chat_id else None
-    who = project_service.assignees_for(project, None)
     lines = [
         note + f"📋 <b>Ready to create: {esc(project.full_name)}</b>",
         "",
+        f"<b>Lead:</b> {esc(project.lead.display_name) if project.lead is not None else '—'}",
         f"<b>Declared assets:</b> {esc(', '.join(declared) if declared else 'Working files only')}",
         f"<b>MG Group:</b> {esc(group.title) if group else 'none — nothing will be announced'}",
-        f"<b>Assigned:</b> {esc(', '.join(u.display_name for u in who) if who else 'nobody yet')}",
+        f"<b>Who archives what:</b>\n{_overview_text(project)}",
         f"<b>Tags:</b> {esc(', '.join(project.tag_names) if project.tags else '—')}",
         "",
         "Creating the archive makes the full folder tree on Google Drive and posts the announcement to the MG Group.",
     ]
-    await safe_edit(update, "\n".join(lines), confirm_keyboard("nw:confirm", "nw:cancel"))
+    await safe_edit(update, clip_message("\n".join(lines)), confirm_keyboard("nw:confirm", "nw:cancel"))
 
 
 async def _wizard_create(update: Update, context: ContextTypes.DEFAULT_TYPE, session: Session, project: Project, actor: User) -> None:
     await safe_edit(update, "⏳ Creating folders on Google Drive…")
-    async with project_lock(context, project.id):  # a double tap must not provision two trees
+    async with project_lock(context, project.id), placement_lock(context):  # a double tap must not provision two trees
         session.refresh(project)
         if project.status != ProjectStatus.DRAFT:
             context.user_data.pop("wizard", None)
@@ -340,7 +415,7 @@ async def _wizard_create(update: Update, context: ContextTypes.DEFAULT_TYPE, ses
         session.commit()
     context.user_data.pop("wizard", None)
     schedule_sheet_sync(context, project.id)
-    posted = await post_to_group(context, project.mg_group_chat_id, notifications.announcement(project, tree_of(context)))
+    posted = await post_announcement(context, session, project)
     note = "✅ <b>Archive created.</b> "
     if project.mg_group_chat_id and not posted:
         note += "⚠️ I couldn't post the announcement to the MG Group (am I still a member?). "
@@ -366,10 +441,11 @@ async def wizard_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, ac
             if arg == "none":
                 wizard["collection_id"] = None
             else:
-                if collection_service.get_collection(session, int(arg)) is None:
+                collection_id = parse_int(arg)
+                if collection_id is None or collection_service.get_collection(session, collection_id) is None:
                     await safe_edit(update, "That collection no longer exists. Send /newproject to start again.")
                     return
-                wizard["collection_id"] = int(arg)
+                wizard["collection_id"] = collection_id
             await _ask_project_name(update, context, session)
             return
         project = _load_draft(session, context, actor)
@@ -378,14 +454,34 @@ async def wizard_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, ac
             return
         if step == "decl":
             if arg == "done":
-                await _wizard_group_step(update, context, session, project)
+                if project.lead_id is None:  # the Super Admin created it: a Team Lead must be chosen
+                    await _wizard_lead_step(update, context, session, project)
+                else:
+                    await _wizard_group_step(update, context, session, project)
             else:
-                project_service.toggle_declaration(session, project, AssetCategory(arg))
+                category = parse_enum(AssetCategory, arg)
+                if category is None or category not in CATEGORY_FLAGS:
+                    return  # malformed button data: ignore
+                project_service.toggle_declaration(session, project, category)
                 session.commit()
                 await query.edit_message_reply_markup(declaration_keyboard(project, "nw:decl"))
-        elif step == "grp":
+        elif step == "lead":
+            lead_id = parse_int(arg)
+            if lead_id is None:
+                return
             try:
-                project_service.set_group(session, project, None if arg == "none" else int(arg))
+                project_service.set_lead(session, project, lead_id)
+            except ProjectError as exc:
+                await safe_edit(update, f"❌ {esc(str(exc))}")
+                return
+            session.commit()
+            await _wizard_group_step(update, context, session, project)
+        elif step == "grp":
+            chat_id = None if arg == "none" else parse_int(arg)
+            if arg != "none" and chat_id is None:
+                return  # malformed button data: ignore
+            try:
+                project_service.set_group(session, project, chat_id)
             except ProjectError as exc:
                 await safe_edit(update, f"❌ {esc(str(exc))}")
                 return
@@ -397,15 +493,28 @@ async def wizard_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, ac
                 await _ask_wizard_meta(update, context, 0)
             else:
                 await _wizard_assign_step(update, context, session, project)
+        elif step == "asgcat":  # a part was chosen: who archives it?
+            category = parse_enum(AssetCategory, arg)
+            if category is None or category not in project_service.assignable_parts(project):
+                return  # malformed button data, or a part this project does not have: ignore
+            await _wizard_people_step(update, session, project, category)
         elif step == "asg":
             if arg == "done":
                 await _wizard_summary(update, context, session, project)
+            elif arg == "parts":
+                await _wizard_assign_step(update, context, session, project)
             else:
-                project_service.toggle_assignment(session, project, int(arg), AssetCategory.ALL)
+                # nw:asg:<part>:<user>; a bare nw:asg:<user> comes from a keyboard sent before parts existed
+                category = parse_enum(AssetCategory, arg) if len(parts) > 3 else AssetCategory.ALL
+                user_id = parse_int(parts[3] if len(parts) > 3 else arg)
+                if category is None or user_id is None or category not in project_service.assignable_parts(project):
+                    return  # malformed button data: ignore
+                try:
+                    project_service.toggle_assignment(session, project, user_id, category)
+                except ProjectError:
+                    return
                 session.commit()
-                users = user_service.list_assignable_users(session)
-                selected = {a.user_id for a in project.assignments if a.category == AssetCategory.ALL}
-                await query.edit_message_reply_markup(user_toggle_keyboard(users, selected, "nw:asg", "nw:asg:done"))
+                await query.edit_message_reply_markup(_wizard_people_keyboard(session, project, category))
         elif step == "confirm":
             await _wizard_create(update, context, session, project, actor)
         elif step == "cancel":
@@ -442,6 +551,10 @@ async def handle_meta_value(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             clear_prompt(context)
             await update.message.reply_text("That project is no longer available.")
             return
+        if not project_service.can_manage(actor, project):
+            clear_prompt(context)
+            await update.message.reply_text(NOT_LEAD)
+            return
         try:
             stored = project_service.set_metadata_field(session, project, field, update.message.text or "")
         except ProjectError as exc:
@@ -453,6 +566,199 @@ async def handle_meta_value(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         await update.message.reply_text(
             f"✅ <b>{METADATA_FIELDS[field]}</b> set to: {esc(stored) if stored else '—'}\n\n" + _metadata_text(project),
             reply_markup=metadata_field_keyboard(project, METADATA_FIELDS),
+        )
+
+
+async def handle_rename(update: Update, context: ContextTypes.DEFAULT_TYPE, actor: User) -> None:
+    prompt = context.user_data.get("prompt") or {}
+    project_id = int(prompt.get("project_id", 0))
+    if ROLE_RANK[actor.role] < ROLE_RANK[Role.TEAM_LEAD]:
+        clear_prompt(context)
+        return
+    with session_scope() as session:
+        project = _load_project(session, project_id)
+        if project is None:
+            clear_prompt(context)
+            await update.message.reply_text("That project is no longer available.")
+            return
+        if not project_service.can_manage(actor, project):
+            clear_prompt(context)
+            await update.message.reply_text(NOT_LEAD)
+            return
+        requested = " ".join((update.message.text or "").split())[:100]
+        await _say_if_waiting(update, context, project.id)
+        async with project_lock(context, project.id), placement_lock(context):
+            if not _prompt_pending(context, prompt):
+                await update.message.reply_text(
+                    f"ℹ️ <b>{esc(project.full_name)}</b> was not renamed to “{esc(requested)}”: that step was closed before its turn came. "
+                    "Press Rename again to repeat it."
+                )
+                return
+            session.refresh(project)
+            try:
+                old, new = await project_service.rename_project(session, project, update.message.text or "", drive_of(context), settings_of(context))
+            except ProjectError as exc:
+                await update.message.reply_text(f"❌ {esc(str(exc))} Send another name or /cancel.")
+                return
+            except DriveError as exc:
+                session.rollback()
+                await update.message.reply_text(f"❌ Google Drive refused to rename the folder: {esc(str(exc))}. The project keeps its name.")
+                return
+            session.commit()
+            _close_prompt(context, prompt)
+        schedule_sheet_sync(context, project.id)
+        await refresh_live_status_from_latest(context, session, project)
+        schedule_announcement_refresh(context, project.id)
+        await post_to_group(context, project.mg_group_chat_id, notifications.renamed_message(old, project))
+        await update.message.reply_text(
+            f"✅ Renamed <b>{esc(old)}</b> → <b>{esc(project.full_name)}</b>.\n\n" + _menu_text(session, project, context),
+            reply_markup=project_menu_keyboard(project, manage=True),
+        )
+        log.info("Project %s renamed to %s by %s", old, project.name, actor.telegram_id)
+
+
+MOVED, UNCHANGED, REFUSED, FAILED, ABANDONED = "moved", "unchanged", "refused", "failed", "abandoned"
+
+
+def _prompt_pending(context: ContextTypes.DEFAULT_TYPE, prompt: dict | None) -> bool:
+    """Whether the text step this handler was started for is still the open one. A /cancel, a command, a button
+    press, its expiry, and the same step opened once more (that is a new prompt) all close it."""
+    return bool(prompt) and get_prompt(context) is prompt
+
+
+def _close_prompt(context: ContextTypes.DEFAULT_TYPE, prompt: dict | None) -> None:
+    """Close the text step that was just carried out, but not one that the user has opened since."""
+    if prompt and context.user_data.get("prompt") is prompt:
+        clear_prompt(context)
+
+
+async def _say_if_waiting(update: Update, context: ContextTypes.DEFAULT_TYPE, project_id: int) -> None:
+    """A rename, move or new archive by somebody else is in progress: say so instead of staying silent."""
+    if placement_lock(context).locked() or project_lock(context, project_id).locked():
+        await update.effective_message.reply_text("⏳ Another change to the archive is in progress. Yours is next, one moment…")
+
+
+def _collection_menu_text(project: Project, collections: list) -> str:
+    where = f"in the collection <b>{esc(project.collection_folder.name)}</b>" if project.collection_folder is not None else "at the top level (in no collection)"
+    lines = [
+        f"📂 <b>{esc(project.name)}</b> is {where}.",
+        "",
+        "Where should it live? Its Google Drive folder is moved too; links keep working and nothing inside the folder changes.",
+    ]
+    if project.collection_id is None and project.collection:
+        lines.append(f"<i>Its Collection label “{esc(project.collection)}” will be replaced by the name of the collection.</i>")
+    offered = [c for c in collections if c.id != project.collection_id]
+    if len(offered) > MAX_COLLECTION_BUTTONS:
+        lines.append(
+            f"<i>Showing {MAX_COLLECTION_BUTTONS} of {len(offered)} collections. For one that is not listed, press "
+            "“New collection…” and send its name: an existing collection is re-used.</i>"
+        )
+    return "\n".join(lines)
+
+
+async def _move_project(
+    context: ContextTypes.DEFAULT_TYPE,
+    session: Session,
+    project: Project,
+    actor: User,
+    target_id: int | None,
+    *,
+    new_name: str | None = None,
+    prompt: dict | None = None,
+) -> tuple[str, str]:
+    """Move *project* into the collection *target_id* (``None`` = top level), or into the collection called
+    *new_name*, which is created when it does not exist (the text prompt).
+
+    Returns (MOVED, html), (UNCHANGED, html: it is there already), (REFUSED, plain reason: the request itself
+    cannot be done), (FAILED, plain reason: Google Drive did not do it; the request can be repeated) or
+    (ABANDONED, ""): the text step was closed while this handler was waiting for its turn.
+    """
+    async with project_lock(context, project.id), placement_lock(context):
+        if new_name is not None and not _prompt_pending(context, prompt):
+            return ABANDONED, ""
+        session.refresh(project)
+        if new_name is not None:
+            # looked up under the lock; a new collection is only stored once the move has happened
+            target = collection_service.find_by_name(session, new_name) or Collection(name=new_name, created_by=actor.telegram_id)
+        else:
+            target = collection_service.get_collection(session, target_id)
+            if target_id is not None and target is None:
+                return REFUSED, "That collection no longer exists."
+        old_collection = project.collection_folder.name if project.collection_folder is not None else None
+        if target is not None and target.id is not None and project.collection_id == target.id:
+            return UNCHANGED, f"ℹ️ <b>{esc(project.name)}</b> is already in <b>{esc(target.name)}</b>."
+        try:
+            old_display = await project_service.move_project(session, project, target, drive_of(context), settings_of(context))
+            session.commit()
+        except ProjectError as exc:
+            session.rollback()
+            return REFUSED, str(exc)
+        except DriveError as exc:
+            session.rollback()
+            return FAILED, f"Google Drive did not confirm the move: {exc}. Nothing was changed in the bot; you can try again."
+        except SQLAlchemyError:
+            session.rollback()
+            log.exception("The move of project %s could not be saved", project.id)
+            return FAILED, (
+                "The bot could not save the change. If the Google Drive folder was moved already, "
+                "choosing the same collection again puts the record right."
+            )
+        if new_name is not None:
+            _close_prompt(context, prompt)
+    schedule_sheet_sync(context, project.id)
+    await refresh_live_status_from_latest(context, session, project)
+    schedule_announcement_refresh(context, project.id)
+    await post_to_group(context, project.mg_group_chat_id, notifications.moved_message(old_collection, project))
+    log.info("Project %s (%s) is now %s, moved by %s", project.id, old_display, project.full_name, actor.telegram_id)
+    if project.collection_folder is None:
+        return MOVED, f"✅ <b>{esc(project.name)}</b> was taken out of <b>{esc(old_collection or '')}</b> and now sits at the top level."
+    return MOVED, f"✅ <b>{esc(project.name)}</b> is now in <b>{esc(project.collection_folder.name)}</b>."
+
+
+async def handle_move_collection_name(update: Update, context: ContextTypes.DEFAULT_TYPE, actor: User) -> None:
+    """The name typed after “New collection…” in a project's Collection menu."""
+    prompt = context.user_data.get("prompt") or {}
+    project_id = int(prompt.get("project_id", 0))
+    if ROLE_RANK[actor.role] < ROLE_RANK[Role.TEAM_LEAD]:
+        clear_prompt(context)
+        return
+    with session_scope() as session:
+        project = _load_project(session, project_id)
+        if project is None:
+            clear_prompt(context)
+            await update.message.reply_text("That project is no longer available.")
+            return
+        if not project_service.can_manage(actor, project):
+            clear_prompt(context)
+            await update.message.reply_text(NOT_LEAD)
+            return
+        if project.status == ProjectStatus.CANCELLED:
+            clear_prompt(context)
+            await update.message.reply_text("This project was cancelled in the meantime. Restore it before moving it.")
+            return
+        try:
+            name = project_service.validate_name(update.message.text or "")
+        except ProjectError as exc:
+            reason = str(exc).replace("Project name", "Collection name")
+            await update.message.reply_text(f"❌ {esc(reason)}\nSend another collection name or /cancel.")
+            return
+        await _say_if_waiting(update, context, project.id)
+        outcome, message = await _move_project(context, session, project, actor, None, new_name=name, prompt=prompt)
+        if outcome == ABANDONED:
+            await update.message.reply_text(
+                f"ℹ️ <b>{esc(project.name)}</b> was not moved to “{esc(name)}”: that step was closed before its turn came. "
+                "Open Collection again to repeat it."
+            )
+            return
+        if outcome == UNCHANGED:
+            await update.message.reply_text(f"{message}\nSend another collection name or /cancel.")
+            return
+        if outcome != MOVED:
+            hint = "Send another collection name or /cancel." if outcome == REFUSED else "Send the name again to retry, or /cancel."
+            await update.message.reply_text(f"❌ {esc(message)}\n{hint}")
+            return
+        await update.message.reply_text(
+            f"{message}\n\n" + _menu_text(session, project, context), reply_markup=project_menu_keyboard(project, manage=True)
         )
 
 
@@ -480,7 +786,11 @@ async def _progress_view(update: Update, context: ContextTypes.DEFAULT_TYPE, ses
 async def project_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, actor: User) -> None:
     query = update.callback_query
     parts = query.data.split(":")
-    project_id, action, args = int(parts[1]), parts[2], parts[3:]
+    project_id = parse_int(parts[1] if len(parts) > 1 else None)
+    action, args = (parts[2] if len(parts) > 2 else ""), parts[3:]
+    if project_id is None:
+        await query.answer("Invalid request.", show_alert=True)
+        return
     settings = settings_of(context)
     with session_scope() as session:
         project = _load_project(session, project_id)
@@ -488,18 +798,52 @@ async def project_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, a
             await query.answer()
             await safe_edit(update, "Project not found.")
             return
+        if action in MANAGE_ACTIONS and not project_service.can_manage(actor, project):
+            await query.answer(NOT_LEAD, show_alert=True)
+            return
 
         if action == "menu":
             await query.answer()
-            await _show_menu(update, context, session, project)
+            await _show_menu(update, context, session, project, actor=actor)
 
         elif action == "details":
             await query.answer()
-            await _show_menu(update, context, session, project)
+            await _show_menu(update, context, session, project, actor=actor)
+
+        elif action == "lead":
+            await query.answer()
+            leads = project_service.eligible_leads(session)
+            current = esc(project.lead.display_name) if project.lead is not None else "none"
+            await safe_edit(
+                update,
+                f"👑 <b>{esc(project.full_name)}</b> — project lead\nCurrent: <b>{current}</b>\n\nThe lead manages the project and receives its notifications. Only Team Leads can be chosen.",
+                lead_choice_keyboard(leads, f"pj:{project.id}:setlead", back_data=f"pj:{project.id}:menu"),
+            )
+
+        elif action == "setlead":
+            lead_id = parse_int(args[0] if args else None)
+            if lead_id is None:
+                await query.answer("Invalid request.", show_alert=True)
+                return
+            try:
+                lead = project_service.set_lead(session, project, lead_id)
+            except ProjectError as exc:
+                await query.answer(str(exc), show_alert=True)
+                return
+            session.commit()
+            schedule_sheet_sync(context, project.id)
+            schedule_announcement_refresh(context, project.id)
+            await query.answer(f"Lead: {lead.display_name}")
+            if lead.telegram_id != actor.telegram_id:
+                await notify_user(context, lead.telegram_id, f"👑 You are now the lead of <b>{esc(project.full_name)}</b>. Open /projects to manage it.")
+            await _show_menu(update, context, session, project, actor=actor)
 
         elif action == "files":
             if project.status == ProjectStatus.CANCELLED:
                 await query.answer("This project's folder is in the Drive trash.", show_alert=True)
+                return
+            if not may_list_files(context, actor.telegram_id):
+                await query.answer("Please wait a minute before requesting another file listing.", show_alert=True)
                 return
             await query.answer("Reading Google Drive…")
             for chunk in await project_file_listing(context, project):
@@ -513,7 +857,7 @@ async def project_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, a
             if not project.mg_group_chat_id:
                 await query.answer("Link an MG Group first (💬 MG group).", show_alert=True)
                 return
-            ok = await post_to_group(context, project.mg_group_chat_id, notifications.announcement(project, tree_of(context)))
+            ok = await post_announcement(context, session, project)
             await query.answer("📣 Announcement posted." if ok else "Could not post — is the bot still in the group?", show_alert=not ok)
 
         elif action == "remind":
@@ -537,14 +881,29 @@ async def project_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, a
 
         elif action == "assign":
             await query.answer()
-            await safe_edit(update, f"👥 <b>{esc(project.full_name)}</b> — assign designers\nPick what to assign for. “All assets” covers every folder.", assign_category_keyboard(project))
+            await safe_edit(
+                update,
+                clip_message(
+                    f"👥 <b>{esc(project.full_name)}</b> — who archives what\nPick a part to change who archives it. “All assets” covers every folder.\n\n"
+                    f"<b>So far</b>\n{_overview_text(project)}"
+                ),
+                assign_category_keyboard(project),
+            )
 
         elif action == "asgcat":
+            category = parse_enum(AssetCategory, args[0] if args else None)
+            if category is None:
+                await query.answer("Invalid request.", show_alert=True)
+                return
             await query.answer()
-            await _assign_users_view(update, session, project, AssetCategory(args[0]))
+            await _assign_users_view(update, session, project, category)
 
         elif action == "asg":
-            category, user_id = AssetCategory(args[0]), int(args[1])
+            category = parse_enum(AssetCategory, args[0] if args else None)
+            user_id = parse_int(args[1] if len(args) > 1 else None)
+            if category is None or user_id is None:
+                await query.answer("Invalid request.", show_alert=True)
+                return
             try:
                 now_on = project_service.toggle_assignment(session, project, user_id, category)
             except ProjectError as exc:
@@ -552,6 +911,7 @@ async def project_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, a
                 return
             session.commit()
             schedule_sheet_sync(context, project.id)
+            schedule_announcement_refresh(context, project.id)
             await query.answer("Assigned" if now_on else "Unassigned")
             users = user_service.list_assignable_users(session)
             selected = {a.user_id for a in project.assignments if a.category == category}
@@ -562,6 +922,52 @@ async def project_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, a
         elif action == "meta":
             await query.answer()
             await safe_edit(update, _metadata_text(project), metadata_field_keyboard(project, METADATA_FIELDS))
+
+        elif action == "rename":
+            if project.status in (ProjectStatus.CANCELLED,):
+                await query.answer("Cancelled projects cannot be renamed.", show_alert=True)
+                return
+            await query.answer()
+            set_prompt(context, "rename", project_id=project.id)
+            await query.message.reply_text(
+                f"✏️ <b>Rename {esc(project.full_name)}</b>\n\nSend the new project name (2–100 characters). The Google Drive folder is renamed to match; links keep working.\n/cancel to abort."
+            )
+
+        elif action == "col":
+            if project.status == ProjectStatus.CANCELLED:
+                await query.answer("Restore the project before moving it.", show_alert=True)
+                return
+            await query.answer()
+            collections = collection_service.list_collections(session)
+            await safe_edit(update, _collection_menu_text(project, collections), collection_move_keyboard(project, collections))
+
+        elif action == "setcol":
+            arg = args[0] if args else ""
+            if project.status == ProjectStatus.CANCELLED:
+                await query.answer("Restore the project before moving it.", show_alert=True)
+                return
+            if arg == "new":
+                await query.answer()
+                set_prompt(context, "move_collection", project_id=project.id)
+                await query.message.reply_text(
+                    f"📂 Send the <b>collection name</b> for <b>{esc(project.name)}</b> (e.g. <i>BF</i>). "
+                    "An existing collection with that name is re-used.\n/cancel to abort."
+                )
+                return
+            target_id = None if arg == "none" else parse_int(arg)
+            if arg != "none" and target_id is None:
+                await query.answer("Invalid request.", show_alert=True)
+                return
+            await query.answer()  # acknowledged now: waiting for Google Drive can take longer than Telegram allows
+            await safe_edit(update, f"⏳ Moving <b>{esc(project.name)}</b> and its Google Drive folder…")  # no buttons meanwhile
+            outcome, message = await _move_project(context, session, project, actor, target_id)
+            if outcome in (REFUSED, FAILED):
+                collections = collection_service.list_collections(session)
+                await safe_edit(
+                    update, f"❌ {esc(message)}\n\n" + _collection_menu_text(project, collections), collection_move_keyboard(project, collections)
+                )
+                return
+            await _show_menu(update, context, session, project, prefix=f"{message}\n\n", actor=actor)
 
         elif action == "mf":
             field = args[0]
@@ -585,25 +991,33 @@ async def project_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, a
             )
 
         elif action == "dt":
-            if args[0] == "done":
+            arg = args[0] if args else ""
+            if arg == "done":
                 await query.answer()
                 await _show_menu(update, context, session, project)
                 return
-            project_service.toggle_declaration(session, project, AssetCategory(args[0]))
-            session.commit()
+            category = parse_enum(AssetCategory, arg)
+            if category is None or category not in CATEGORY_FLAGS:
+                await query.answer("Invalid request.", show_alert=True)
+                return
             created: list[str] = []
             toast, alert = "Saved", False
-            if project.drive_root_id:
-                try:
-                    created = await project_service.ensure_folders(session, project, drive_of(context), settings)
-                    session.commit()
-                    if created:
-                        toast = "Folder created on Drive"
-                except (ProjectError, DriveError) as exc:
-                    session.rollback()
-                    log.warning("ensure_folders failed: %s", exc)
-                    toast, alert = f"Saved, but Drive folder creation failed: {exc}"[:190], True
+            async with project_lock(context, project.id):  # a double tap must not create duplicate folders
+                session.refresh(project)
+                project_service.toggle_declaration(session, project, category)
+                session.commit()
+                if project.drive_root_id:
+                    try:
+                        created = await project_service.ensure_folders(session, project, drive_of(context), settings)
+                        session.commit()
+                        if created:
+                            toast = "Folder created on Drive"
+                    except (ProjectError, DriveError) as exc:
+                        session.rollback()
+                        log.warning("ensure_folders failed: %s", exc)
+                        toast, alert = f"Saved, but Drive folder creation failed: {exc}"[:190], True
             schedule_sheet_sync(context, project.id)
+            schedule_announcement_refresh(context, project.id)
             await query.answer(toast, show_alert=alert)
             await query.edit_message_reply_markup(declaration_keyboard(project, f"pj:{project.id}:dt", done_text="◀️ Back to project"))
 
@@ -618,8 +1032,13 @@ async def project_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, a
             await safe_edit(update, f"💬 Which MG Group should receive this project's announcements?\n{now}{GROUP_HINT}", group_choice_keyboard(groups, f"pj:{project.id}:grp"))
 
         elif action == "grp":
+            arg = args[0] if args else ""
+            chat_id = None if arg == "none" else parse_int(arg)
+            if arg != "none" and chat_id is None:
+                await query.answer("Invalid request.", show_alert=True)
+                return
             try:
-                project_service.set_group(session, project, None if args[0] == "none" else int(args[0]))
+                project_service.set_group(session, project, chat_id)
             except ProjectError as exc:
                 await query.answer(str(exc), show_alert=True)
                 return

@@ -39,7 +39,7 @@ async def test_validation_only_checks_declared_assets(db, settings, drive):
         assert not report.complete and (result.old_status, result.new_status) == (ProjectStatus.ACTIVE, ProjectStatus.INCOMPLETE)
         required = {i.key for i in report.required_items}
         assert required == {"fonts", "ae", "contin_prores", "contin_hap", "lyrics_png"}
-        assert {i.key for i in report.items if not i.required} == {"psd", "timeline_prores", "timeline_hap"}
+        assert {i.key for i in report.items if not i.required} == {"psd", "timeline_prores", "timeline_hap", "titlebars"}
         # upload everything except Contin Videos / Hap
         drive.put_file(p.folder("fonts").drive_id, "Font.otf")
         sub = drive.create_folder("AE Project", p.folder("ae").drive_id)  # files in sub-folders count
@@ -257,3 +257,102 @@ async def test_notification_texts(db, settings, drive):
         assert reminder.startswith("⏰") and "Alice" in reminder
         details = notifications.project_details(p, result.report, tree, __import__("zoneinfo").ZoneInfo("UTC"))
         assert "Declared assets:</b> Timeline" in details and "Previews:</b> 0" in details
+
+
+@pytest.mark.asyncio
+async def test_titlebars_are_validated_only_when_declared(db, settings, drive):
+    tree = build_folder_tree(settings.folder_names())
+    with session_scope() as s:
+        user_service.register_designer(s, 21, "Tia", None)
+        p = await make_project(s, drive, settings, name="Titles", TITLEBARS=True)
+        project_service.toggle_assignment(s, p, 21, AssetCategory.TITLEBARS)
+        result = await validate_project(s, p, drive, settings)
+        assert {i.key for i in result.report.required_items} == {"fonts", "ae", "titlebars"}
+        assert result.new_status == ProjectStatus.INCOMPLETE
+        text = notifications.progress_message(p, result.report, tree, tz=None)
+        assert "Final Render / Titlebars</a>" in text and "Titlebars /" not in text  # one folder, no format folders
+        assert text.count("Tia") == 1  # the Titlebars assignee is named on the Titlebars folder only
+        announce = notifications.announcement(p, tree)
+        assert "• Final Render / Titlebars — " in announce and "Titlebars /" not in announce
+        details = notifications.project_details(p, result.report, tree, tz=None)
+        assert "<b>Declared assets:</b> Titlebars\n" in details and "<b>Asset type:</b> Working Files, Titlebars" in details
+        import re
+
+        reminder = re.sub(r"<[^>]+>", "", notifications.reminder_message(p, result.report, tree)).splitlines()
+        assert [line for line in reminder if "Titlebars" in line] == ["❌ Final Render / Titlebars  👤 Tia"]
+        assert sum("👤" in line for line in reminder) == 1  # Fonts and AE have nobody assigned
+        assert f'href="{p.folder("titlebars").link}"' in notifications.reminder_message(p, result.report, tree)
+
+        drive.put_file(p.folder("fonts").drive_id, "Font.otf")
+        drive.put_file(p.folder("ae").drive_id, "titles.aep")
+        result = await validate_project(s, p, drive, settings)
+        assert [i.key for i in result.report.missing] == ["titlebars"] and not result.report.complete
+        # any file makes it complete, whatever its format, also inside a folder the designer made
+        own = drive.create_folder("Lower thirds", p.folder("titlebars").drive_id)
+        drive.put_file(own.id, "Title_01.png")
+        result = await validate_project(s, p, drive, settings)
+        assert result.report.complete and result.became_ready
+        assert [(i.key, i.file_count) for i in result.report.required_items if i.key == "titlebars"] == [("titlebars", 1)]
+        drive.put_file(p.folder("titlebars").drive_id, "Title_02.mov", md5="t2", mime_type="video/quicktime")
+        result = await validate_project(s, p, drive, settings)
+        # titlebars are overlays: no MP4 previews are made from them
+        assert result.source_files == {} and plan_previews(s, p, result.source_files) == []
+
+        # switched off again: the uploaded files stay, the folder is simply no longer checked
+        project_service.set_declaration(s, p, AssetCategory.TITLEBARS, False)
+        result = await validate_project(s, p, drive, settings)
+        assert {i.key for i in result.report.required_items} == {"fonts", "ae"} and result.report.complete
+
+
+@pytest.mark.asyncio
+async def test_people_are_not_searchable_and_every_match_says_why(db, settings, drive):
+    with session_scope() as s:
+        grateful = await make_project(s, drive, settings, "God I'm Just Grateful (Sep 2026)")
+        project_service.set_metadata_field(s, grateful, "tags", "declaration, fresh, grateful")
+        project_service.set_metadata_field(s, grateful, "creator", "jonny boy")
+        assert grateful.creator == "jonny boy"
+        # a person's name is never a reason to show a project
+        for query in ("jon", "jonny", "jonny boy", "boy"):
+            assert search_service.search_projects(s, query) == [], query
+        # ...but a tag that happens to contain those letters is
+        jonah = await make_project(s, drive, settings, "Sign of Jonah")
+        project_service.set_metadata_field(s, jonah, "tags", "jonah, sea")
+        hits = search_service.search_projects(s, "jon")
+        assert [h.project.name for h in hits] == ["Sign of Jonah"]
+        assert hits[0].matched == {"jon": "name"} and hits[0].reasons == {"jon": "project name"}
+
+        # one reason per term, always the most important place it occurs
+        full = await make_project(s, drive, settings, "Opening Loop", CONTIN_VIDEOS=True)
+        for field, value in (
+            ("tags", "worship, golden hour, r&b"), ("event", "Easter Service"), ("collection", "Spring Series"),
+            ("ministry", "Youth"), ("style", "cinematic"), ("colours", "teal, amber"), ("year", "2024"),
+            ("description", "Slow particles over a warm haze"),
+        ):
+            project_service.set_metadata_field(s, full, field, value)
+        expected = {
+            "worship": "tag #worship",
+            "opening": "project name",
+            "easter": "event",
+            "spring": "collection",
+            "golden": "tag #golden hour",  # part of a tag
+            "youth": "ministry",
+            "cinematic": "style",
+            "amber": "colours",
+            "2024": "year",
+            "contin": "asset types",
+            "haze": "description",
+            "r&b": "tag #r&b",
+        }
+        for term, reason in expected.items():
+            hits = search_service.search_projects(s, term)
+            assert [h.project.name for h in hits] == ["Opening Loop"], term
+            assert hits[0].reasons == {term: reason}, term
+        # several terms: each says where it matched, in the order they were typed
+        hit = search_service.search_projects(s, "amber, worship, haze")[0]
+        assert list(hit.reasons.items()) == [("amber", "colours"), ("worship", "tag #worship"), ("haze", "description")]
+        card = notifications.search_result_card(hit.project, hit.reasons)
+        assert card.endswith("<i>🔎 Matched “amber” in colours · “worship” in tag #worship · “haze” in description</i>")
+        # text is escaped; a card without reasons has no such line
+        card = notifications.search_result_card(full, search_service.search_projects(s, "r&b")[0].reasons)
+        assert "“r&amp;b” in tag #r&amp;b" in card and "r&b" not in card.replace("#r&b", "")
+        assert "Matched" not in notifications.search_result_card(full)

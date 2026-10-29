@@ -63,7 +63,16 @@ def fake_ffmpeg(tmp_path: Path) -> Path:
 
 
 @pytest.fixture(autouse=True)
+def _fast_scrypt(monkeypatch):
+    """OWASP-strength scrypt (p=5) is right for production but slow for 100+ tests; hashes still self-describe their cost."""
+    monkeypatch.setattr("mg_archive_bot.security._SCRYPT_P", 1)
+
+
+@pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
     for key in list(os.environ):
-        if key.startswith(("TELEGRAM_", "GOOGLE_", "DRIVE_", "SUPER_ADMIN", "INITIAL_ACCESS", "DATABASE_URL", "FAKE_FFMPEG")):
+        if key.startswith((
+            "TELEGRAM_", "GOOGLE_", "DRIVE_", "SUPER_ADMIN", "INITIAL_ACCESS", "DATABASE_URL", "FAKE_FFMPEG",
+            "FOLDER_NAME_", "TRACKING_", "PREVIEW", "TIMEZONE",
+        )):
             monkeypatch.delenv(key, raising=False)

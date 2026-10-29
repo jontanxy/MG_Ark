@@ -8,11 +8,33 @@ import secrets
 
 _SCRYPT_N = 2**14
 _SCRYPT_R = 8
-_SCRYPT_P = 1
+_SCRYPT_P = 5  # OWASP: N=2^14 (16 MiB), r=8, p=5
 _DKLEN = 32
 
 TOKEN_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no 0/O/1/I ambiguity
 TOKEN_PREFIX = "MG-"
+
+MIN_PASSWORD_LENGTH = 12
+# Values that ship in .env.example / documentation or are too common to be a shared secret.
+PLACEHOLDER_PASSWORDS = frozenset(
+    {"change-me-please", "changeme", "change-me", "password", "password1", "password123", "123456789012", "qwertyuiop12", "letmein12345"}
+)
+
+
+class WeakPasswordError(ValueError):
+    pass
+
+
+def validate_new_password(password: str) -> str:
+    """Return *password* if it is acceptable as the shared access password, else raise WeakPasswordError."""
+    if len(password) < MIN_PASSWORD_LENGTH:
+        raise WeakPasswordError(f"Password must be at least {MIN_PASSWORD_LENGTH} characters.")
+    lowered = password.lower()
+    if lowered in PLACEHOLDER_PASSWORDS or lowered.replace(" ", "") in PLACEHOLDER_PASSWORDS:
+        raise WeakPasswordError("That password is a well-known placeholder; choose a real passphrase.")
+    if len(set(lowered)) < 4:
+        raise WeakPasswordError("Password is too repetitive; choose a real passphrase.")
+    return password
 
 
 def hash_password(password: str) -> str:

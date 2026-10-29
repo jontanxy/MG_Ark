@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import tzinfo
 
 from ..constants import (
+    CATEGORY_FLAGS,
     CATEGORY_LABELS,
     STATUS_LABELS,
     AssetCategory,
@@ -12,13 +13,21 @@ from ..constants import (
     folder_path_label,
 )
 from ..models import Project, User
-from ..util import esc, fmt_dt, mention
-from .projects import assignees_for, required_leaves
+from ..util import clip_message, esc, fmt_dt, mention
+from .projects import assignable_parts, assigned_to_part, assignees_for, required_leaves
 from .validation import ValidationReport
 
 
+MAX_MENTIONS = 15
+MAX_DESCRIPTION_SHOWN = 600
+
+
 def _mentions(users: list[User]) -> str:
-    return ", ".join(mention(u.telegram_id, u.display_name) for u in users) if users else "—"
+    if not users:
+        return "—"
+    shown = ", ".join(mention(u.telegram_id, u.display_name) for u in users[:MAX_MENTIONS])
+    extra = len(users) - MAX_MENTIONS
+    return shown + (f" +{extra} more" if extra > 0 else "")
 
 
 def status_line(project: Project) -> str:
@@ -27,6 +36,18 @@ def status_line(project: Project) -> str:
 
 def tags_line(project: Project) -> str:
     return " ".join(f"#{esc(t)}" for t in project.tag_names) if project.tags else "<i>no tags</i>"
+
+
+def assignment_overview(project: Project) -> list[str]:
+    """One line per part that has people on it, e.g. "• Contin Videos: Dee Signer". Plain names, HTML-escaped."""
+    lines = []
+    for category in assignable_parts(project):
+        people = assigned_to_part(project, category)
+        if people:
+            names = ", ".join(u.display_name for u in people[:MAX_MENTIONS])
+            extra = f" +{len(people) - MAX_MENTIONS} more" if len(people) > MAX_MENTIONS else ""
+            lines.append(f"• {esc(CATEGORY_LABELS[category])}: {esc(names)}{extra}")
+    return lines
 
 
 def announcement(project: Project, tree: list[FolderSpec]) -> str:
@@ -43,10 +64,12 @@ def announcement(project: Project, tree: list[FolderSpec]) -> str:
         lines.append(f"• {label}{link}" + (f"  👤 {_mentions(who)}" if who else ""))
     everyone = assignees_for(project, None)
     lines.append("")
+    if project.lead is not None:
+        lines.append(f"👑 <b>Lead:</b> {mention(project.lead.telegram_id, project.lead.display_name)}")
     lines.append(f"👥 <b>Assigned:</b> {_mentions(everyone)}")
     lines.append("")
     lines.append("Upload your files into the folders above. I check Google Drive automatically and will post progress here.")
-    return "\n".join(lines)
+    return clip_message("\n".join(lines))
 
 
 def progress_block(project: Project, report: ValidationReport, tree: list[FolderSpec], *, with_links: bool = False) -> list[str]:
@@ -84,7 +107,7 @@ def progress_message(project: Project, report: ValidationReport, tree: list[Fold
     else:
         lines.append("All declared assets are uploaded — awaiting Team Lead verification.")
     lines.append(f"<i>Checked {esc(fmt_dt(project.last_validated_at, tz))}</i>")
-    return "\n".join(lines)
+    return clip_message("\n".join(lines))
 
 
 def reminder_message(project: Project, report: ValidationReport, tree: list[FolderSpec]) -> str:
@@ -96,7 +119,7 @@ def reminder_message(project: Project, report: ValidationReport, tree: list[Fold
         lines.append(f"❌ {label}" + (f"  👤 {_mentions(who)}" if who else ""))
     if project.drive_link:
         lines += ["", f'📁 <a href="{project.drive_link}">Project folder</a>']
-    return "\n".join(lines)
+    return clip_message("\n".join(lines))
 
 
 def ready_message(project: Project) -> str:
@@ -121,6 +144,22 @@ def restored_message(project: Project) -> str:
     return f"♻️ <b>{esc(project.full_name)}</b> has been restored; its Drive folder is back and tracking has resumed."
 
 
+def renamed_message(old_name: str, project: Project) -> str:
+    return f"✏️ <b>{esc(old_name)}</b> is now <b>{esc(project.full_name)}</b>. The Google Drive folder was renamed too; existing links keep working."
+
+
+def moved_message(old_collection: str | None, project: Project) -> str:
+    """Group notice after a project was put into, taken out of, or moved between collections."""
+    new_collection = project.collection_folder.name if project.collection_folder is not None else None
+    if new_collection is None:
+        what = f"<b>{esc(project.name)}</b> was taken out of the collection <b>{esc(old_collection or '')}</b>"
+    elif old_collection is None:
+        what = f"<b>{esc(project.name)}</b> is now part of the collection <b>{esc(new_collection)}</b>"
+    else:
+        what = f"<b>{esc(project.name)}</b> moved from <b>{esc(old_collection)}</b> to the collection <b>{esc(new_collection)}</b>"
+    return f"📂 {what}. The Google Drive folder was moved with it; existing links keep working."
+
+
 def reopened_message(project: Project) -> str:
     return f"🟢 <b>{esc(project.full_name)}</b> has been reopened for further uploads."
 
@@ -141,8 +180,9 @@ def project_details(project: Project, report: ValidationReport | None, tree: lis
         if value:
             lines.append(f"<b>{label}:</b> {esc(value)}")
     if project.description:
-        lines += ["", esc(project.description)]
-    declared = [CATEGORY_LABELS[c] for c in (AssetCategory.TIMELINE, AssetCategory.CONTIN_VIDEOS, AssetCategory.CONTIN_LYRICS, AssetCategory.PSD) if project.flag({AssetCategory.TIMELINE: "has_timeline", AssetCategory.CONTIN_VIDEOS: "has_contin_videos", AssetCategory.CONTIN_LYRICS: "has_contin_lyrics", AssetCategory.PSD: "has_psd"}[c])]
+        shown = project.description[:MAX_DESCRIPTION_SHOWN] + ("…" if len(project.description) > MAX_DESCRIPTION_SHOWN else "")
+        lines += ["", esc(shown)]
+    declared = [CATEGORY_LABELS[c] for c, flag in CATEGORY_FLAGS.items() if project.flag(flag)]
     lines += ["", f"<b>Declared assets:</b> {esc(', '.join(declared) if declared else 'Working files only')}"]
     ready = project.ready_previews
     lines.append(f"<b>Previews:</b> {len(ready)} available")
@@ -151,16 +191,26 @@ def project_details(project: Project, report: ValidationReport | None, tree: lis
     who = assignees_for(project, None)
     if who:
         lines.append(f"<b>Assigned:</b> {_mentions(who)}")
+    lines.append(f"<b>Lead:</b> {esc(project.lead.display_name) if project.lead is not None else '⚠️ none — set one from the project menu'}")
     if creator:
         lines.append(f"<b>Created by:</b> {esc(creator.display_name)} · {esc(fmt_dt(project.created_at, tz))}")
     if project.status == ProjectStatus.CANCELLED:
         lines.append(f"<b>Cancelled:</b> {esc(fmt_dt(project.cancelled_at, tz))} — Drive folder in the trash")
     if report is not None:
         lines += ["", "<b>Latest check</b>"] + progress_block(project, report, tree) + [f"<i>{esc(fmt_dt(project.last_validated_at, tz))}</i>"]
-    return "\n".join(lines)
+    return clip_message("\n".join(lines))
 
 
-def search_result_card(project: Project) -> str:
+def match_line(reasons: dict[str, str]) -> str:
+    """Why a search result matched, e.g. "🔎 Matched “gold” in tag #gold · “red” in colours"."""
+    parts = [f"“{esc(term)}” in {esc(reason)}" for term, reason in reasons.items()]
+    return f"<i>🔎 Matched {' · '.join(parts)}</i>" if parts else ""
+
+
+def search_result_card(project: Project, reasons: dict[str, str] | None = None) -> str:
     n = len(project.ready_previews)
     previews = f"{n} preview{'s' if n != 1 else ''} available" if n else "no previews yet"
-    return f"🎬 <b>{esc(project.full_name)}</b>\n\n{tags_line(project)}\n\n{previews} · {status_line(project)}"
+    text = f"🎬 <b>{esc(project.full_name)}</b>\n\n{tags_line(project)}\n\n{previews} · {status_line(project)}"
+    if reasons:
+        text += "\n" + match_line(reasons)
+    return clip_message(text)

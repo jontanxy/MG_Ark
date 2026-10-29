@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 
 from telegram import Update
+from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
 from ...constants import UserStatus
@@ -21,13 +22,17 @@ async def route_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await auth.handle_password(update, context)
         return
     actor = resolve_actor(update, context)
-    if actor is None:
-        if may_reply_to_unregistered(context, update.effective_user.id):
-            await update.message.reply_text("Send /start to register with the access password.")
-        return
-    if actor.status != UserStatus.ACTIVE:
+    if actor is None or actor.status != UserStatus.ACTIVE:
+        # Text from an unprivileged sender may well be the password typed after the prompt expired: remove it.
+        try:
+            await update.message.delete()
+        except TelegramError:
+            pass
         clear_prompt(context)
-        await update.message.reply_text("🚫 Your access has been revoked. Contact the Super Admin.")
+        if may_reply_to_unregistered(context, update.effective_user.id):
+            await update.message.reply_text(
+                "Send /start to register with the access password." if actor is None else "🚫 Your access has been revoked. Contact the Super Admin."
+            )
         return
     kind = prompt.get("kind") if prompt else None
     if kind == "expired":
@@ -43,6 +48,10 @@ async def route_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await projects.handle_wizard_meta(update, context, actor)
     elif kind == "meta_value":
         await projects.handle_meta_value(update, context, actor)
+    elif kind == "rename":
+        await projects.handle_rename(update, context, actor)
+    elif kind == "move_collection":
+        await projects.handle_move_collection_name(update, context, actor)
     elif kind == "search":
         await search.handle_search_text(update, context, actor)
     else:

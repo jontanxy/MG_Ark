@@ -64,6 +64,7 @@ class AssetCategory(str, enum.Enum):
     TIMELINE = "TIMELINE"
     CONTIN_VIDEOS = "CONTIN_VIDEOS"
     CONTIN_LYRICS = "CONTIN_LYRICS"
+    TITLEBARS = "TITLEBARS"
     PSD = "PSD"
 
 
@@ -73,14 +74,17 @@ CATEGORY_LABELS: dict[AssetCategory, str] = {
     AssetCategory.TIMELINE: "Timeline",
     AssetCategory.CONTIN_VIDEOS: "Contin Videos",
     AssetCategory.CONTIN_LYRICS: "Contin Lyrics",
+    AssetCategory.TITLEBARS: "Titlebars",
     AssetCategory.PSD: "PSD",
 }
 
-# Project boolean attribute that switches each declarable category on.
+# Project boolean attribute that switches each declarable category on. The order is the order of the
+# declaration buttons, the assignment list and the derived "Asset types" text.
 CATEGORY_FLAGS: dict[AssetCategory, str] = {
     AssetCategory.TIMELINE: "has_timeline",
     AssetCategory.CONTIN_VIDEOS: "has_contin_videos",
     AssetCategory.CONTIN_LYRICS: "has_contin_lyrics",
+    AssetCategory.TITLEBARS: "has_titlebars",
     AssetCategory.PSD: "has_psd",
 }
 
@@ -100,6 +104,7 @@ DEFAULT_FOLDER_NAMES: dict[str, str] = {
     "timeline": "Timeline",
     "contin_videos": "Contin Videos",
     "contin_lyrics": "Contin Lyrics",
+    "titlebars": "Titlebars",
     "prores": "ProRes 4444",
     "hap": "Hap/Hap Alpha",
     "png": "PNG",
@@ -115,7 +120,7 @@ class FolderSpec:
     category: AssetCategory | None = None
     # Project attribute that makes this leaf *required*; "always" means unconditional; None = never validated.
     required_when: str | None = None
-    # Project attribute that must be true for the folder to be created at all (only PSD).
+    # Project attribute that must be true for the folder to be created at all (PSD and Titlebars).
     create_when: str | None = None
 
     @property
@@ -142,8 +147,16 @@ def build_folder_tree(names: Mapping[str, str] | None = None) -> list[FolderSpec
         FolderSpec("contin_hap", "contin_videos", n["hap"], AssetCategory.CONTIN_VIDEOS, "has_contin_videos"),
         FolderSpec("contin_lyrics", "final_render", n["contin_lyrics"], AssetCategory.CONTIN_LYRICS),
         FolderSpec("lyrics_png", "contin_lyrics", n["png"], AssetCategory.CONTIN_LYRICS, "has_contin_lyrics"),
+        # Titlebars were added after the first archives existed, so (like PSD) the folder only appears in
+        # projects that declare it; older projects are left untouched. It is one folder, without format folders.
+        FolderSpec("titlebars", "final_render", n["titlebars"], AssetCategory.TITLEBARS, "has_titlebars", "has_titlebars"),
         FolderSpec("previews", "root", n["previews"]),
     ]
+
+
+# Folders that an earlier layout had and this one does not: for one evening Titlebars was split into the two
+# format folders. The bot forgets them (see projects.forget_obsolete_folders); on Google Drive they are left alone.
+OBSOLETE_FOLDER_KEYS = frozenset({"titlebars_prores", "titlebars_hap"})
 
 
 def folder_path_label(tree: list[FolderSpec], key: str) -> str:

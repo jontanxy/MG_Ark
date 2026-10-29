@@ -72,6 +72,8 @@ class DriveClient(Protocol):
     def upload(self, src: Path, parent_id: str, name: str, mime_type: str | None = None) -> DriveFile: ...
     def delete(self, file_id: str) -> None: ...
     def restore(self, file_id: str) -> None: ...
+    def rename(self, file_id: str, name: str) -> DriveFile: ...
+    def move(self, file_id: str, new_parent_id: str, name: str | None = None) -> DriveFile: ...
 
 
 def _escape_query_value(value: str) -> str:
@@ -154,8 +156,15 @@ class GoogleDriveClient:
                 f"for a service account check the key file. ({exc})"
             )
         if isinstance(exc, HttpError):
-            return DriveError(f"Google Drive error: {exc}")
-        return DriveError(f"Google Drive transport error: {exc!r}")
+            status = getattr(getattr(exc, "resp", None), "status", "?")
+            log.warning("Google API error %s: %s", status, exc)  # full detail (URL, message) stays in the log
+            hint = {403: "permission denied or quota exceeded", 404: "not found or not shared with the bot", 429: "rate limited"}.get(status, "")
+            # Only Google's fixed reason code is shown to users; its free-text message can embed file ids and URLs.
+            codes = [d.get("reason") for d in (getattr(exc, "error_details", None) or []) if isinstance(d, dict) and d.get("reason")]
+            code = f" [{codes[0][:40]}]" if codes and isinstance(codes[0], str) else ""
+            return DriveError(f"Google Drive error {status}" + (f" ({hint})" if hint else "") + code)
+        log.warning("Google transport error: %r", exc)
+        return DriveError("Google Drive is unreachable right now (network error); please try again later.")
 
     @staticmethod
     def _failure_types() -> tuple[type[BaseException], ...]:
@@ -276,6 +285,40 @@ class GoogleDriveClient:
     def restore(self, file_id: str) -> None:
         """Take a file or folder back out of the trash."""
         self._run(self._service().files().update(fileId=file_id, body={"trashed": False}, fields="id", supportsAllDrives=True))
+
+    def rename(self, file_id: str, name: str) -> DriveFile:
+        item = self._run(self._service().files().update(fileId=file_id, body={"name": name}, fields=self.FIELDS, supportsAllDrives=True))
+        return self._to_file(item)
+
+    def move(self, file_id: str, new_parent_id: str, name: str | None = None) -> DriveFile:
+        """Put a file or folder into another folder (and optionally rename it) in one request. Ids never change."""
+        current = self.get_file(file_id)
+        if current is None:
+            raise DriveError("The folder no longer exists on Google Drive.")
+        changes: dict[str, str] = {}
+        if new_parent_id not in current.parents:
+            changes["addParents"] = new_parent_id
+        leaving = [p for p in current.parents if p != new_parent_id]
+        if leaving:
+            changes["removeParents"] = ",".join(leaving)
+        body = {"name": name} if name and name != current.name else {}
+        if not changes and not body:
+            return current
+        try:
+            item = self._run(
+                self._service().files().update(fileId=file_id, body=body, fields=self.FIELDS, supportsAllDrives=True, **changes)
+            )
+        except DriveError:
+            # The request may have been applied although its answer was lost (and a repeat is then refused):
+            # look at the folder itself before calling it a failure.
+            try:
+                after = self.get_file(file_id)
+            except DriveError:
+                after = None
+            if after is not None and after.parents == (new_parent_id,) and (not name or after.name == name):
+                return after
+            raise
+        return self._to_file(item)
 
 
 # --------------------------------------------------------------------------------------
@@ -421,6 +464,37 @@ class InMemoryDriveClient:
             if node is None:
                 raise DriveError(f"file not found: {file_id}")
             node.trashed = False
+
+    def rename(self, file_id: str, name: str) -> DriveFile:
+        with self._lock:
+            node = self._nodes.get(file_id)
+            if node is None:
+                raise DriveError(f"file not found: {file_id}")
+            f = node.file
+            node.file = DriveFile(f.id, name, f.mime_type, f.size, f.md5, f.modified_time, f.parents, f.drive_id, f.trashed)
+            return node.file
+
+    def move(self, file_id: str, new_parent_id: str, name: str | None = None) -> DriveFile:
+        self.calls.append(("move", (file_id, new_parent_id, name)))
+        with self._lock:
+            node, target = self._nodes.get(file_id), self._nodes.get(new_parent_id)
+            if node is None:
+                raise DriveError(f"file not found: {file_id}")
+            if target is None or not target.file.is_folder or self._is_trashed(new_parent_id):
+                raise DriveError(f"folder not found: {new_parent_id}")
+            above = target
+            while above is not None:  # a folder cannot be put inside itself
+                if above.file.id == file_id:
+                    raise DriveError("a folder cannot be moved into itself")
+                above = self._nodes.get(above.file.parents[0]) if above.file.parents else None
+            for parent_id in node.file.parents:
+                parent = self._nodes.get(parent_id)
+                if parent is not None and file_id in parent.children:
+                    parent.children.remove(file_id)
+            target.children.append(file_id)
+            f = node.file
+            node.file = DriveFile(f.id, name or f.name, f.mime_type, f.size, f.md5, f.modified_time, (new_parent_id,), f.drive_id, f.trashed)
+            return node.file
 
 
 def build_drive_client(settings: Settings) -> DriveClient:

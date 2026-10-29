@@ -7,16 +7,13 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from ..constants import CATEGORY_FLAGS, CATEGORY_LABELS, REVOCABLE_STATUSES, AssetCategory, ProjectStatus, Role
 from ..models import MGGroup, Project, User
 
-DECLARABLE = (AssetCategory.TIMELINE, AssetCategory.CONTIN_VIDEOS, AssetCategory.CONTIN_LYRICS, AssetCategory.PSD)
-ASSIGNABLE = (
-    AssetCategory.ALL,
-    AssetCategory.WORKING_FILE,
-    AssetCategory.TIMELINE,
-    AssetCategory.CONTIN_VIDEOS,
-    AssetCategory.CONTIN_LYRICS,
-    AssetCategory.PSD,
-)
+# Timeline, Contin Videos, Contin Lyrics, Titlebars, PSD: one source of truth, so a new asset type shows up everywhere.
+DECLARABLE = tuple(CATEGORY_FLAGS)
+ASSIGNABLE = (AssetCategory.ALL, AssetCategory.WORKING_FILE, *DECLARABLE)
 MAX_USER_BUTTONS = 60
+MAX_COLLECTION_BUTTONS = MAX_USER_BUTTONS
+# Markers after names in assignment lists (Designers carry none).
+ROLE_MARKERS = {Role.TEAM_LEAD: " ★", Role.SUPER_ADMIN: " 👁️‍🗨️"}
 
 
 def _btn(text: str, data: str) -> InlineKeyboardButton:
@@ -28,6 +25,19 @@ def collection_choice_keyboard(collections) -> InlineKeyboardMarkup:
     for c in list(collections)[:MAX_USER_BUTTONS]:
         rows.append([_btn(f"📂 {c.name}", f"nw:col:{c.id}")])
     rows.append([_btn("➕ New collection…", "nw:col:new")])
+    return InlineKeyboardMarkup(rows)
+
+
+def collection_move_keyboard(project: Project, collections) -> InlineKeyboardMarkup:
+    """Where a project can go: out of its collection, into another one, or into a new one."""
+    pid = project.id
+    rows = []
+    if project.collection_id is not None:
+        rows.append([_btn("📁 Top level (take it out of the collection)", f"pj:{pid}:setcol:none")])
+    for c in [c for c in collections if c.id != project.collection_id][:MAX_COLLECTION_BUTTONS]:
+        rows.append([_btn(f"📂 {c.name}", f"pj:{pid}:setcol:{c.id}")])
+    rows.append([_btn("➕ New collection…", f"pj:{pid}:setcol:new")])
+    rows.append([_btn("◀️ Back to project", f"pj:{pid}:menu")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -55,7 +65,7 @@ def user_toggle_keyboard(users: Iterable[User], selected: set[int], prefix: str,
     rows = []
     for u in list(users)[:MAX_USER_BUTTONS]:
         mark = "✅" if u.telegram_id in selected else "⬜️"
-        role = "★" if u.role != Role.DESIGNER else ""
+        role = ROLE_MARKERS.get(u.role, "")
         rows.append([_btn(f"{mark} {u.display_name}{role}", f"{prefix}:{u.telegram_id}")])
     rows.append([_btn(done_text, done_data)])
     return InlineKeyboardMarkup(rows)
@@ -65,14 +75,25 @@ def confirm_keyboard(confirm_data: str, cancel_data: str, confirm_text: str = "C
     return InlineKeyboardMarkup([[_btn(confirm_text, confirm_data), _btn(cancel_text, cancel_data)]])
 
 
-def project_menu_keyboard(project: Project) -> InlineKeyboardMarkup:
+def project_menu_keyboard(project: Project, *, manage: bool = True) -> InlineKeyboardMarkup:
+    """Full menu for the project's lead and the Super Admin; a read-only menu for other Team Leads."""
     pid = project.id
+    if not manage:
+        rows = [
+            [_btn("🔎 Check progress", f"pj:{pid}:check"), _btn("📂 Files", f"pj:{pid}:files"), _btn("ℹ️ Details", f"pj:{pid}:details")],
+            [_btn("▶️ Previews", f"pj:{pid}:previews")],
+        ]
+        if project.drive_link:
+            rows.append([InlineKeyboardButton("📁 Open in Google Drive", url=project.drive_link)])
+        rows.append([_btn("◀️ Projects", "pl:0:open")])
+        return InlineKeyboardMarkup(rows)
     rows: list[list[InlineKeyboardButton]] = [
         [_btn("🔎 Check progress", f"pj:{pid}:check"), _btn("📂 Files", f"pj:{pid}:files"), _btn("ℹ️ Details", f"pj:{pid}:details")],
         [_btn("📣 Announce", f"pj:{pid}:announce"), _btn("⏰ Remind", f"pj:{pid}:remind")],
-        [_btn("👥 Assign designers", f"pj:{pid}:assign"), _btn("🏷 Edit metadata", f"pj:{pid}:meta")],
-        [_btn("⚙️ Declared assets", f"pj:{pid}:decl"), _btn("💬 MG group", f"pj:{pid}:group")],
+        [_btn("👥 Assign designers", f"pj:{pid}:assign"), _btn("🏷 Edit metadata", f"pj:{pid}:meta"), _btn("✏️ Rename", f"pj:{pid}:rename")],
+        [_btn("⚙️ Declared assets", f"pj:{pid}:decl"), _btn("💬 MG group", f"pj:{pid}:group"), _btn("📂 Collection", f"pj:{pid}:col")],
         [_btn("🎞 Generate previews", f"pj:{pid}:prev"), _btn("▶️ Previews", f"pj:{pid}:previews")],
+        [_btn("👑 Project lead", f"pj:{pid}:lead")],
     ]
     if project.status == ProjectStatus.CANCELLED:
         rows = [
@@ -92,6 +113,13 @@ def project_menu_keyboard(project: Project) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+def lead_choice_keyboard(leads: Iterable[User], prefix: str, back_data: str | None = None) -> InlineKeyboardMarkup:
+    rows = [[_btn(f"👑 {u.display_name}", f"{prefix}:{u.telegram_id}")] for u in list(leads)[:MAX_USER_BUTTONS]]
+    if back_data:
+        rows.append([_btn("◀️ Back", back_data)])
+    return InlineKeyboardMarkup(rows)
+
+
 def confirm_revoke_keyboard(project_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [[_btn("🗑 Yes, revoke and trash the folder", f"pj:{project_id}:revoke2"), _btn("Cancel", f"pj:{project_id}:menu")]]
@@ -104,14 +132,22 @@ def back_to_project_keyboard(project_id: int, extra_rows: list[list[InlineKeyboa
     return InlineKeyboardMarkup(rows)
 
 
-def assign_category_keyboard(project: Project) -> InlineKeyboardMarkup:
+def assign_category_keyboard(
+    project: Project, *, prefix: str | None = None, footer: tuple[str, str] | None = None
+) -> InlineKeyboardMarkup:
+    """One button per part of the project people can be assigned to, with how many are on it.
+
+    The project menu uses the defaults; the new-project wizard passes its own *prefix* and a Continue *footer*.
+    """
+    prefix = prefix or f"pj:{project.id}:asgcat"
+    footer_text, footer_data = footer or ("◀️ Back to project", f"pj:{project.id}:menu")
     rows = []
     for cat in ASSIGNABLE:
         if cat in CATEGORY_FLAGS and not project.flag(CATEGORY_FLAGS[cat]):
             continue
         n = sum(1 for a in project.assignments if a.category == cat)
-        rows.append([_btn(f"{CATEGORY_LABELS[cat]} ({n})", f"pj:{project.id}:asgcat:{cat.value}")])
-    rows.append([_btn("◀️ Back to project", f"pj:{project.id}:menu")])
+        rows.append([_btn(f"{CATEGORY_LABELS[cat]} ({n})", f"{prefix}:{cat.value}")])
+    rows.append([_btn(footer_text, footer_data)])
     return InlineKeyboardMarkup(rows)
 
 

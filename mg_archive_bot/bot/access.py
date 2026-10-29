@@ -35,6 +35,26 @@ GROUP_TYPES = {ChatType.GROUP, ChatType.SUPERGROUP}
 # ----------------------------------------------------------------------------------------
 
 
+def parse_int(value: str | None, *, max_digits: int = 18) -> int | None:
+    """Parse an integer from callback data; None for anything malformed or absurdly long."""
+    if value is None:
+        return None
+    body = value[1:] if value.startswith("-") else value
+    if not body.isdigit() or len(body) > max_digits:
+        return None
+    return int(value)
+
+
+def parse_enum(enum_cls, value: str | None):
+    """Return the enum member for *value*, or None when it is not a valid member."""
+    if value is None:
+        return None
+    try:
+        return enum_cls(value)
+    except ValueError:
+        return None
+
+
 def settings_of(context: ContextTypes.DEFAULT_TYPE) -> Settings:
     return context.bot_data["settings"]
 
@@ -46,6 +66,16 @@ def drive_of(context: ContextTypes.DEFAULT_TYPE) -> DriveClient:
 def project_lock(context: ContextTypes.DEFAULT_TYPE, project_id: int) -> asyncio.Lock:
     locks: dict[int, asyncio.Lock] = context.bot_data.setdefault("project_locks", {})
     return locks.setdefault(project_id, asyncio.Lock())
+
+
+def placement_lock(context: ContextTypes.DEFAULT_TYPE) -> asyncio.Lock:
+    """One archive-wide lock for whatever decides a project's name or place (create, rename, move), so that the
+    check "is this name free there?" and the change itself never interleave with another one.
+    Always taken INSIDE the project lock, never the other way round."""
+    lock = context.bot_data.get("placement_lock")
+    if lock is None:
+        lock = context.bot_data["placement_lock"] = asyncio.Lock()
+    return lock
 
 
 def limiter(context: ContextTypes.DEFAULT_TYPE, name: str, limit: int, window_seconds: float) -> SlidingWindow:
@@ -177,7 +207,8 @@ def require(
                     await deny(update, "You're not an authorised user of this bot. Message me privately and send /start.")
                 return None
             if actor.status != UserStatus.ACTIVE:
-                await deny(update, "Your access has been revoked. Contact the Super Admin.")
+                if update.callback_query is not None or may_reply_to_unregistered(context, update.effective_user.id):
+                    await deny(update, "Your access has been revoked. Contact the Super Admin.")
                 return None
             if group and group_auth:
                 chat = update.effective_chat

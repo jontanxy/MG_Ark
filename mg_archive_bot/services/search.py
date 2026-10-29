@@ -10,6 +10,7 @@ from ..models import Project
 from ..util import normalise_terms
 
 # Ranking per requirement §10: exact tag > project name > event/collection > metadata > description.
+# People's names are never searched: the Creator field is left out on purpose.
 # Weights are separated by more than MAX_TERMS so a single higher-tier match always outranks any
 # number of lower-tier matches (lexicographic ordering of tiers).
 MAX_TERMS = 20
@@ -24,48 +25,52 @@ W_DESCRIPTION = 1
 class SearchHit:
     project: Project
     score: int
-    matched: dict[str, str] = field(default_factory=dict)  # term -> where it matched best
+    matched: dict[str, str] = field(default_factory=dict)  # term -> tier it matched in ("tag", "name", ...)
+    reasons: dict[str, str] = field(default_factory=dict)  # term -> where exactly, for people ("tag #gold", "colours")
 
 
-def _score_term(project: Project, term: str) -> tuple[int, str]:
+def _score_term(project: Project, term: str) -> tuple[int, str, str]:
+    """(score, tier, reason) of the best place *term* occurs in; score 0 when it occurs nowhere searchable."""
     tags = [t.lower() for t in project.tag_names]
-    best, where = 0, ""
     if term in tags:
-        best, where = W_EXACT_TAG, "tag"
+        return W_EXACT_TAG, "tag", f"tag #{term}"
     if term in (project.name or "").lower():
-        if W_NAME > best:
-            best, where = W_NAME, "name"
-    if term in (project.event or "").lower() or term in (project.collection or "").lower():
-        if W_EVENT_COLLECTION > best:
-            best, where = W_EVENT_COLLECTION, "event/collection"
-    metadata_fields = (
-        project.ministry,
-        project.style,
-        project.colours,
-        str(project.year or ""),
-        project.creator,
-        project.asset_types,
+        return W_NAME, "name", "project name"
+    if term in (project.event or "").lower():
+        return W_EVENT_COLLECTION, "event/collection", "event"
+    if term in (project.collection or "").lower():
+        return W_EVENT_COLLECTION, "event/collection", "collection"
+    partial_tag = next((t for t in tags if term in t), None)
+    if partial_tag is not None:
+        return W_METADATA, "metadata", f"tag #{partial_tag}"
+    metadata_fields = (  # no Creator: projects are not found by people's names
+        ("ministry", project.ministry),
+        ("style", project.style),
+        ("colours", project.colours),
+        ("year", str(project.year or "")),
+        ("asset types", project.asset_types),
     )
-    if any(term in (v or "").lower() for v in metadata_fields) or any(term in t for t in tags):
-        if W_METADATA > best:
-            best, where = W_METADATA, "metadata"
+    for label, value in metadata_fields:
+        if term in (value or "").lower():
+            return W_METADATA, "metadata", label
     if term in (project.description or "").lower():
-        if W_DESCRIPTION > best:
-            best, where = W_DESCRIPTION, "description"
-    return best, where
+        return W_DESCRIPTION, "description", "description"
+    return 0, "", ""
 
 
 def score_project(project: Project, terms: list[str]) -> SearchHit | None:
     """All terms must match (AND). Returns None when any term is unmatched."""
     total = 0
     matched: dict[str, str] = {}
+    reasons: dict[str, str] = {}
     for term in terms:
-        score, where = _score_term(project, term)
+        score, where, reason = _score_term(project, term)
         if score == 0:
             return None
         total += score
         matched[term] = where
-    return SearchHit(project=project, score=total, matched=matched)
+        reasons[term] = reason
+    return SearchHit(project=project, score=total, matched=matched, reasons=reasons)
 
 
 def search_projects(session: Session, query: str, *, include_drafts: bool = False) -> list[SearchHit]:

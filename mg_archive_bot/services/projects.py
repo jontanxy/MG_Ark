@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from ..config import Settings
 from ..constants import (
+    OBSOLETE_FOLDER_KEYS,
     CATEGORY_FLAGS,
     CATEGORY_LABELS,
     CONTRIBUTOR_ROLES,
@@ -18,6 +19,7 @@ from ..constants import (
     AssetCategory,
     FolderSpec,
     ProjectStatus,
+    Role,
     build_folder_tree,
 )
 from ..models import Assignment, Collection, Project, ProjectFolder, Tag, User
@@ -101,18 +103,71 @@ def create_draft(
         raise ProjectError(f"A project named “{cleaned}” already exists{where}.")
     for draft in stale_drafts(session, created_by):
         session.delete(draft)
+    creator_user = session.get(User, created_by)
+    by_super_admin = creator_user is not None and creator_user.role == Role.SUPER_ADMIN
     project = Project(
         name=cleaned,
         status=ProjectStatus.DRAFT,
         created_by=created_by,
-        creator=creator_name or "",
+        # The Super Admin sets projects up for others: Creator then names the lead chosen in the wizard (set_lead).
+        creator="" if by_super_admin else (creator_name or ""),
         year=year,
         collection_id=collection.id if collection else None,
         collection=collection.name if collection else "",
+        # A Team Lead leads what they create; the Super Admin must pick a lead in the wizard.
+        lead_id=created_by if creator_user is not None and creator_user.role == Role.TEAM_LEAD else None,
     )
     session.add(project)
     session.flush()
     return project
+
+
+def can_manage(user: User, project: Project) -> bool:
+    """Only the project's lead and the Super Admin may change a project; other Team Leads only view it."""
+    return user.role == Role.SUPER_ADMIN or (project.lead_id is not None and user.telegram_id == project.lead_id)
+
+
+def eligible_leads(session: Session) -> list[User]:
+    """Active users holding the Team Lead role — the only people who can lead a project."""
+    return [u for u in session.scalars(select(User)).all() if u.role == Role.TEAM_LEAD and u.is_active]
+
+
+def set_lead(session: Session, project: Project, user_id: int) -> User:
+    user = session.get(User, user_id)
+    if user is None or not user.is_active:
+        raise ProjectError("That user is not an active member.")
+    if user.role != Role.TEAM_LEAD:
+        raise ProjectError("The project lead must hold the Team Lead role (the Super Admin cannot lead a project).")
+    project.lead_id = user.telegram_id
+    project.lead = user
+    if project.status == ProjectStatus.DRAFT and not project.creator:
+        project.creator = user.display_name  # set up by the Super Admin: the lead stands as Creator
+    session.flush()
+    return user
+
+
+def release_led_projects(session: Session, user_id: int) -> list[Project]:
+    """When someone stops being an active Team Lead, their projects lose their lead until reassigned."""
+    projects = list(session.scalars(select(Project).where(Project.lead_id == user_id)).all())
+    for project in projects:
+        project.lead_id = None
+        project.lead = None
+    session.flush()
+    return projects
+
+
+def backfill_leads(session: Session) -> tuple[int, list[str]]:
+    """Legacy rows: adopt the creator as lead when they are a Team Lead. Returns (adopted, names still without a lead)."""
+    adopted, missing = 0, []
+    for project in session.scalars(select(Project).where(Project.lead_id.is_(None), Project.status != ProjectStatus.DRAFT)):
+        creator = session.get(User, project.created_by)
+        if creator is not None and creator.role == Role.TEAM_LEAD and creator.is_active:
+            project.lead_id = creator.telegram_id
+            adopted += 1
+        else:
+            missing.append(project.full_name)
+    session.flush()
+    return adopted, missing
 
 
 def delete_draft(session: Session, project: Project) -> None:
@@ -155,8 +210,12 @@ def declared_categories(project: Project) -> list[AssetCategory]:
 # ----------------------------------------------------------------------------------------
 
 
+MAX_TAGS = 20
+MAX_TAG_LENGTH = 40
+
+
 def set_tags(session: Session, project: Project, raw: str) -> list[str]:
-    names = normalise_terms(raw)
+    names = normalise_terms(raw, max_terms=MAX_TAGS, max_length=MAX_TAG_LENGTH)
     tags: list[Tag] = []
     for name in names:
         tag = session.scalar(select(Tag).where(Tag.name == name))
@@ -216,6 +275,8 @@ def toggle_assignment(session: Session, project: Project, user_id: int, category
         raise ProjectError("User not found.")
     if user.role not in CONTRIBUTOR_ROLES:
         raise ProjectError(f"{user.display_name} has the {ROLE_LABELS[user.role]} role and cannot be assigned assets.")
+    if not user.is_active:
+        raise ProjectError(f"{user.display_name}'s access has been revoked.")
     a = Assignment(project_id=project.id, user_id=user_id, category=category)
     session.add(a)
     project.assignments.append(a)
@@ -223,11 +284,30 @@ def toggle_assignment(session: Session, project: Project, user_id: int, category
     return True
 
 
+def assignable_parts(project: Project) -> list[AssetCategory]:
+    """The parts people can be assigned to in this project: everything, the working files, and each declared asset."""
+    return [AssetCategory.ALL, AssetCategory.WORKING_FILE, *declared_categories(project)]
+
+
+def assigned_to_part(project: Project, category: AssetCategory) -> list[User]:
+    """People assigned to exactly this part (not counting "All assets"); revoked and view-only people are left out."""
+    people = [
+        a.user
+        for a in project.assignments
+        if a.category == category and a.user is not None and a.user.is_active and a.user.role in CONTRIBUTOR_ROLES
+    ]
+    return sorted(people, key=lambda u: u.display_name.lower())
+
+
 def assignees_for(project: Project, category: AssetCategory | None) -> list[User]:
-    """Users responsible for *category* (explicit or via ALL). ``None`` returns everyone assigned."""
+    """Users responsible for *category* (explicit or via ALL). ``None`` returns everyone assigned to a part the
+    project has (an assignment to an asset that was switched off counts again when it is switched back on)."""
+    parts = set(assignable_parts(project)) if category is None else None
     seen: dict[int, User] = {}
     for a in project.assignments:
-        if category is None or a.category == AssetCategory.ALL or a.category == category:
+        if a.user is None or not a.user.is_active or a.user.role not in CONTRIBUTOR_ROLES:
+            continue  # never mention revoked or view-only people
+        if (category is None and a.category in parts) or a.category == AssetCategory.ALL or a.category == category:
             seen.setdefault(a.user_id, a.user)
     return sorted(seen.values(), key=lambda u: u.display_name.lower())
 
@@ -239,6 +319,108 @@ def assignees_for(project: Project, category: AssetCategory | None) -> list[User
 
 def required_leaves(project: Project, tree: list[FolderSpec]) -> list[FolderSpec]:
     return [spec for spec in tree if spec.is_leaf and project.flag(spec.required_when)]
+
+
+async def rename_project(session: Session, project: Project, new_name: str, drive: DriveClient, settings: Settings) -> tuple[str, str]:
+    """Rename a project and its Drive folder. Returns (old name, new name). The Drive rename happens first, so a
+    Drive failure leaves the project untouched."""
+    if project.status in (ProjectStatus.DRAFT, ProjectStatus.CANCELLED):
+        raise ProjectError("Drafts and cancelled projects cannot be renamed.")
+    cleaned = validate_name(new_name)
+    if cleaned == project.name:
+        raise ProjectError("That is already the project's name.")
+    if name_in_use(session, cleaned, exclude_id=project.id, collection_id=project.collection_id):
+        where = f" in “{project.collection_folder.name}”" if project.collection_folder is not None else ""
+        raise ProjectError(f"A project named “{cleaned}” already exists{where}.")
+    old = project.name
+    if project.drive_root_id:
+        parent = project.collection_folder.drive_id if project.collection_folder is not None and project.collection_folder.drive_id else (
+            settings.drive_root_folder_id or getattr(drive, "ROOT_ID", "root")
+        )
+        root_id = project.drive_root_id
+
+        def _rename_folder() -> str:
+            folder_name = _unique_root_name(drive, cleaned, parent) if drive.find_child_folder(cleaned, parent) is not None else cleaned
+            drive.rename(root_id, folder_name)
+            return folder_name
+
+        folder_name = await asyncio.to_thread(_rename_folder)
+        root_row = project.folder("root")
+        if root_row is not None:
+            root_row.name = folder_name
+    project.name = cleaned
+    session.flush()
+    return old, cleaned
+
+
+async def move_project(session: Session, project: Project, target: Collection | None, drive: DriveClient, settings: Settings) -> str:
+    """Put a project into a collection, or take it out of one (*target* ``None`` = top level of the archive).
+
+    *target* may be a NEW collection that is not stored yet (``target.id is None``): it is stored only after the
+    Drive folder has been moved into it, so a move that does not happen leaves no collection behind.
+
+    Returns the project's previous display name. The Drive folder is moved first and the database follows, so
+    when Drive fails the bot's records are unchanged; folder ids do not change, so every link keeps working.
+    Callers hold the placement lock: the name check and the move must not interleave with another move, rename
+    or creation.
+    """
+    from .collections import ensure_collection_folder, find_by_name, name_taken_message, taken_by_top_level_project
+
+    if project.status in (ProjectStatus.DRAFT, ProjectStatus.CANCELLED):
+        raise ProjectError("Drafts and cancelled projects cannot be moved.")
+    new_collection = target is not None and target.id is None
+    target_id = target.id if target is not None else None
+    if new_collection:
+        if taken_by_top_level_project(session, target.name, except_project_id=project.id):
+            raise ProjectError(name_taken_message(target.name))
+    else:
+        if project.collection_id == target_id:
+            raise ProjectError(f"It is already in “{target.name}”." if target is not None else "It is not in a collection.")
+        if name_in_use(session, project.name, exclude_id=project.id, collection_id=target_id):
+            where = f"in “{target.name}”" if target is not None else "at the top level"
+            raise ProjectError(f"A project named “{project.name}” already exists {where}. Rename one of them first.")
+    old_display = project.full_name
+    if project.drive_root_id:
+        folder_created = False
+        if target is not None:
+            folder_created = await ensure_collection_folder(session, target, drive, settings, moving_root_id=project.drive_root_id)
+            session.commit()  # the folder of a stored collection is real now; never hold its write open across the move
+            parent = target.drive_id
+        else:
+            parent = settings.drive_root_folder_id or getattr(drive, "ROOT_ID", "root")
+        root_id, name = project.drive_root_id, project.name
+
+        def _move_folder() -> str:
+            try:
+                taken = drive.find_child_folder(name, parent)
+                folder_name = name if taken is None or taken.id == root_id else _unique_root_name(drive, name, parent)
+                drive.move(root_id, parent, folder_name)
+            except (DriveError, ProjectError):
+                if new_collection and folder_created:  # made for this move only: do not leave it lying around
+                    try:
+                        if not drive.list_children(parent):
+                            drive.delete(parent)
+                    except DriveError as exc:
+                        log.warning("Could not remove the unused collection folder %s: %s", parent, exc)
+                raise
+            return folder_name
+
+        folder_name = await asyncio.to_thread(_move_folder)
+        root_row = project.folder("root")
+        if root_row is not None:
+            root_row.name = folder_name
+    if new_collection:
+        stored = find_by_name(session, target.name)  # a wizard may have stored that name in the meantime
+        if stored is not None:
+            if not stored.drive_id:
+                stored.drive_id, stored.link = target.drive_id, target.link
+            target = stored
+    project.collection_folder = target  # a new collection is stored through this link
+    session.flush()
+    project.collection_id = target.id if target is not None else None
+    project.collection = target.name if target is not None else ""  # the label follows the folder
+    session.flush()
+    return old_display
 
 
 def _unique_root_name(drive: DriveClient, name: str, parent_id: str) -> str:
@@ -268,11 +450,16 @@ async def provision_folders(session: Session, project: Project, drive: DriveClie
     if not settings.drive_root_folder_id and settings.google_auth_mode != "fake":
         raise ProjectError("DRIVE_ROOT_FOLDER_ID is not configured.")
     root_parent = settings.drive_root_folder_id or getattr(drive, "ROOT_ID", "root")
+    if name_in_use(session, project.name, exclude_id=project.id, collection_id=project.collection_id):
+        # Drafts do not reserve their name: another project may have taken it while this one was being set up.
+        where = f" in “{project.collection_folder.name}”" if project.collection_folder is not None else ""
+        raise ProjectError(f"A project named “{project.name}” now exists{where}. Cancel and start again with another name.")
     if project.collection_folder is not None:
         from .collections import ensure_collection_folder  # local import: collections depends on projects
 
-        collection = await ensure_collection_folder(session, project.collection_folder, drive, settings)
-        root_parent = collection.drive_id
+        await ensure_collection_folder(session, project.collection_folder, drive, settings)
+        session.commit()  # the collection folder is real now; never hold its write open across the tree build
+        root_parent = project.collection_folder.drive_id
     tree = build_folder_tree(settings.folder_names())
     flags = {spec.key: (spec.create_when is None or project.flag(spec.create_when)) for spec in tree}
     project_name = project.name
@@ -302,8 +489,30 @@ async def provision_folders(session: Session, project: Project, drive: DriveClie
     return project
 
 
+def forget_obsolete_folders(session: Session, project: Project) -> list[tuple[str, str, str]]:
+    """Drop the records of folders that an earlier layout created and the current one does not have.
+    Returns (key, name, link) of each, for the log.
+
+    Nothing is changed on Google Drive. The bot cannot know whether somebody is uploading into such a folder
+    (a file only exists on Drive once its upload has finished), so removing one is left to a person. Whatever a
+    folder holds or receives later keeps counting for the folder above it, as far as the check looks (three
+    levels below that folder).
+    """
+    rows = [f for f in project.folders if f.key in OBSOLETE_FOLDER_KEYS]
+    forgotten = [(f.key, f.name, f.link) for f in rows]
+    for row in rows:
+        project.folders.remove(row)
+    if rows:
+        session.flush()
+    return forgotten
+
+
 async def ensure_folders(session: Session, project: Project, drive: DriveClient, settings: Settings) -> list[str]:
-    """Create any folders missing from the tree (e.g. PSD enabled after creation). Returns created keys."""
+    """Create any folders missing from the tree (e.g. PSD enabled after creation). Returns created keys.
+
+    If Drive fails part-way (several assets were switched on), the folders that do exist are recorded and
+    committed before the error is raised again, so they are linked and checked, and a later call only adds the rest.
+    """
     if not project.drive_root_id:
         raise ProjectError("Project has no Drive folder yet.")
     tree = build_folder_tree(settings.folder_names())
@@ -316,23 +525,29 @@ async def ensure_folders(session: Session, project: Project, drive: DriveClient,
         return []
     known = {"root": project.drive_root_id, **{f.key: f.drive_id for f in project.folders}}
 
-    def _create() -> dict[str, str]:
+    def _create() -> tuple[dict[str, str], DriveError | None]:
         made: dict[str, str] = {}
-        for spec in missing:
-            parent_id = known.get(spec.parent_key or "root") or made.get(spec.parent_key or "root")
-            if parent_id is None:
-                continue
-            existing = drive.find_child_folder(spec.name, parent_id)
-            folder = existing or drive.create_folder(spec.name, parent_id)
-            made[spec.key] = folder.id
-            known[spec.key] = folder.id
-        return made
+        try:
+            for spec in missing:
+                parent_id = known.get(spec.parent_key or "root") or made.get(spec.parent_key or "root")
+                if parent_id is None:
+                    continue
+                existing = drive.find_child_folder(spec.name, parent_id)
+                folder = existing or drive.create_folder(spec.name, parent_id)
+                made[spec.key] = folder.id
+                known[spec.key] = folder.id
+        except DriveError as exc:
+            return made, exc
+        return made, None
 
-    made = await asyncio.to_thread(_create)
+    made, error = await asyncio.to_thread(_create)
     for spec in missing:
         if spec.key in made:
             _record_folder(session, project, spec.key, spec.name, made[spec.key])
     session.flush()
+    if error is not None:
+        session.commit()  # these folders are real on Drive now: callers roll back when they see the error
+        raise error
     return list(made)
 
 
@@ -416,6 +631,8 @@ def set_group(session: Session, project: Project, chat_id: int | None) -> None:
     if chat_id != project.mg_group_chat_id:
         project.status_message_id = None  # the live status message belongs to the old chat
         project.status_message_hash = None
+        project.announcement_message_id = None  # so does the announcement
+        project.announcement_message_hash = None
     project.mg_group_chat_id = chat_id
     session.flush()
 

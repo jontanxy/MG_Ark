@@ -15,7 +15,7 @@ Requirements: `docs/REQUIREMENTS.md` · Design: `docs/DESIGN.md`
 | Progress tracking | Google Drive is the source of truth. Scheduled scans validate only the declared assets; status moves ACTIVE → INCOMPLETE / READY_FOR_VERIFICATION → ARCHIVED (Team Lead verification) |
 | Reminders | Daily reminder in the MG Group listing missing folders and mentioning the responsible designers; on-demand `/status` and `/remind` |
 | Previews | ProRes 4444 files in Timeline / Contin Videos are transcoded to small MP4s (ffmpeg) stored in `_Previews/` on Drive; **Preview** hands out their Drive links privately (nothing is uploaded to Telegram) |
-| Discovery | `/search worship, gold, particles` (AND, case-insensitive, de-duplicated) ranked: exact tag → name → event/collection → metadata → description. Result cards offer **Preview**, **Open Archive**, **Details** |
+| Discovery | `/search worship, gold, particles` (AND, case-insensitive, de-duplicated) ranked: exact tag → name → event/collection → metadata → description. People's names are not searched. Each result says what it matched, e.g. “gold” in tag #gold. Result cards offer **Preview**, **Open Archive**, **Details** |
 | Project index | A Google Sheet in the archive root with one row per project ever created, kept in sync automatically (`/sheet`) |
 | Roles | Super Admin (fixed Telegram ID), Team Lead, Designer — exactly the permissions in the requirements — plus **Lights**, a preview-only role (search + Preview, nothing else) that is never assigned uploads |
 | Access | Password registration on `/start` (never asked again), revocation, brute-force lockout, MG Groups authorised only via provisioning tokens, "authorised user AND authorised group" rule in groups |
@@ -41,6 +41,15 @@ cp .env.example .env
 ```
 
 Edit `.env`: set `TELEGRAM_BOT_TOKEN`, `SUPER_ADMIN_TELEGRAM_ID`, `INITIAL_ACCESS_PASSWORD`, and the Google settings from §3.
+
+### Dependencies
+
+`requirements.txt` lists direct dependencies; `requirements.lock` is the fully pinned, hash-verified set used by the
+Docker image (`pip install --require-hashes -r requirements.lock`). Regenerate it after changing `requirements.txt`:
+
+```bash
+pip install pip-tools && pip-compile --generate-hashes --strip-extras -o requirements.lock requirements.txt
+```
 
 ## 3. Google Drive access
 
@@ -97,6 +106,9 @@ for your work account so you can do steps 1–2 there.
    sign in with the account that owns the archive, and copy the produced `secrets/oauth-token.json` to the bot host.
 3. Set `GOOGLE_AUTH_MODE=oauth` and `DRIVE_ROOT_FOLDER_ID`.
 
+Use a **dedicated Google account** that only has access to the archive folder: the token grants the bot that
+account's *entire* Drive, and it is stored on the bot host (file mode 0600, keep it that way).
+
 ### Option C — Try it without Google
 
 `GOOGLE_AUTH_MODE=fake` runs the whole bot against an in-memory Drive: every flow works in Telegram, nothing is written to
@@ -109,10 +121,11 @@ source .venv/bin/activate
 python -m mg_archive_bot
 ```
 
-Or with Docker (ffmpeg included):
+Or with Docker (ffmpeg included; the container runs as an unprivileged user with all capabilities dropped and a
+read-only image, so make the mounted directories accessible to uid 10001 first):
 
 ```bash
-docker compose up -d --build
+chown -R 10001 data secrets && docker compose up -d --build
 ```
 
 On first start the access password is seeded from `INITIAL_ACCESS_PASSWORD`. **Editing `.env` later does not change
@@ -124,6 +137,11 @@ python -m mg_archive_bot.tools.reset_password
 ```
 
 (`--prompt` asks for the password instead of reading `.env`; both also clear any login lockouts.)
+
+**Updating to a newer version:** stop the bot, copy `data/mg_archive.sqlite3` somewhere safe, update the code and
+start the bot again. New database columns are added automatically at start-up and existing projects are left as
+they are. Going *back* to an older version is only safe with that copy: once a newer feature has been used (for
+example somebody was assigned to Titlebars), an older version cannot read those records.
 
 ## 5. First-time setup in Telegram
 
@@ -144,9 +162,16 @@ python -m mg_archive_bot.tools.reset_password
 **Team Lead (private chat)**
 
 * `/newproject` — where it lives (top level, an existing collection, or a new collection such as `BF`) → name →
-  toggle Timeline / Contin Videos / Contin Lyrics / PSD → **pick the MG Group** (every authorised group is listed;
-  the project is never linked to a chat silently) → optional metadata → assign designers → **Create archive**.
-  Folders are created and the announcement with folder links is posted to the chosen group only.
+  toggle Timeline / Contin Videos / Contin Lyrics / Titlebars / PSD → **pick the MG Group** (every authorised group is listed;
+  the project is never linked to a chat silently) → optional metadata → **who archives what** → **Create archive**.
+  In the who-archives-what step you pick a part (All assets, Working File, or each declared asset such as Contin
+  Videos or Titlebars) and tick the people for it; “All assets” covers every folder. Folders are created and the
+  announcement with folder links is posted to the chosen group only, with each folder naming the people who archive it.
+* The announcement stays current: when you change who archives what, the declared assets, the lead, the name or the
+  collection, the bot edits that message in place a few seconds later, and checks of open projects correct it if
+  anything else changed (for example someone's access was revoked). Telegram does not notify people about edits, so a newly assigned person is
+  not pinged by it. **Announce** posts a fresh copy and marks the earlier one as replaced. Announcements posted before
+  this version are not tracked; press **Announce** once to get one that updates itself.
 * One Team Lead can run several projects with separate group chats: each chat must be authorised once
   (`/creategroup` → add the bot to that group, or `/activate <token>` inside it) and then appears as a choice in the
   wizard and under **MG group** in the project menu. Renaming a group in Telegram is picked up automatically (from the
@@ -154,8 +179,25 @@ python -m mg_archive_bot.tools.reset_password
 * **Collections** group sub-projects in one folder: `BF/Opening/…`, `BF/Worship/…`. Each sub-project keeps its own
   declarations, tracking, previews and verification; its Collection metadata is set automatically, so `/search bf`
   finds all of them. A collection folder that already exists under the root is re-used.
-* `/projects` → project menu: **Check progress**, **Announce**, **Remind**, **Assign designers** (per folder group),
-  **Files** (folder-by-folder listing with names and sizes), **Edit metadata**, **Declared assets**, **MG group**,
+  A project can change its place later: project menu → **📂 Collection** → take it out of its collection (top level),
+  put it into another collection, or into a new one. The project's Google Drive folder is moved with it (folder
+  links keep working and nothing inside changes), the index sheet and the live status message follow, and the MG
+  Group is told. Project names stay unique inside the place a project arrives in. A collection that becomes empty
+  is kept, together with its folder, and can be used again (if its empty folder was deleted in Google Drive, a new
+  one is made). A new collection can be named after the project you are moving into it, but not after another
+  project that sits at the top level: a collection is never given a project's Drive folder. A collection you type
+  under **New collection…** only comes into being when the move has worked, so a typo or a Drive problem leaves
+  nothing behind.
+* **Project lead**: every project has exactly one lead, who must hold the Team Lead role (never the Super Admin). A
+  Team Lead who creates a project is its lead; when the Super Admin creates one, the wizard asks who leads it. Only the
+  lead and the Super Admin can change a project (assign, metadata, group, previews, verify, revoke…); other Team Leads
+  see a read-only menu. The lead receives the project's notifications, is named in the announcement and the index
+  sheet, and can be changed via **👑 Project lead**. Revoking or demoting a lead frees their projects until a new lead
+  is set (the Super Admin is told which ones).
+* `/projects` → project menu: **Check progress**, **Announce**, **Remind**, **Assign designers** (who archives which part),
+  **Files** (folder-by-folder listing with names and sizes), **Edit metadata**, **Rename** (renames the Drive folder
+  too; links keep working, the group is told), **Declared assets**, **MG group**, **Collection** (move the project
+  into or out of a collection),
   **Generate previews**, **Previews**, **Verify & archive**, **Reopen**, **Revoke project**, **Open in Google Drive**.
 * **Revoke project** (for a project that will not go ahead): after a confirmation, its Drive folder is moved to the
   trash, tracking and reminders stop, it disappears from search, its row is removed from the index sheet (rows below
@@ -170,13 +212,19 @@ python -m mg_archive_bot.tools.reset_password
   and refreshed on every status, metadata, assignment or group change; a nightly job rewrites the whole sheet from the
   database as a safety net.
 * `/sheet` (Team Lead) sends the link; `/sheet rebuild` rewrites it on demand. The sheet is plain data with a frozen,
-  filterable header row, so it stays readable for years (Google Sheets allows 10 million cells ≈ 400 000 projects).
+  filterable header row, so it stays readable for years (Google Sheets allows 10 million cells ≈ 370 000 projects).
+  Columns `A`–`AA` belong to the bot. When a new version adds a column (Titlebars was the latest), the column is
+  inserted in place on the first sync after the upgrade, so your filter views and anything you keep to the right
+  of the table move along with it. Do not keep per-project notes in the sheet: rows are rewritten in project order.
 * Requires the **Google Sheets API** to be enabled in the same Cloud project as the Drive API (APIs & Services →
   Library → Google Sheets API → Enable). If it is not, the bot keeps working and DMs the Super Admin once.
 
 **Everyone (private chat)**
 
-* `/search worship, gold` or simply type keywords. Each result has **Preview**, **Open Archive**, **Details** and
+* `/search worship, gold` or simply type keywords. Tags are the best way to be found: an exact tag ranks above
+  everything else. People's names are not searched (a project's Creator is shown in Details but never matched).
+  Every result card ends with what it matched on, for example *Matched “gold” in tag #gold · “red” in colours*.
+  Each result has **Preview**, **Open Archive**, **Details** and
   **Files** — a folder-by-folder list of what has been uploaded (file names and sizes, folders linked to Drive).
 
 **MG Group**
@@ -197,7 +245,9 @@ python -m mg_archive_bot.tools.reset_password
 * Every `SCAN_INTERVAL_MINUTES` (default 30) and on every manual check, the bot lists each required leaf folder on Drive
   (recursively, 3 levels). A leaf is satisfied when it contains at least one file. Required leaves are
   `Working File/Fonts`, `Working File/AE` (always) and, only if declared, `Timeline/ProRes 4444`, `Timeline/Hap/Hap Alpha`,
-  `Contin Videos/ProRes 4444`, `Contin Videos/Hap/Hap Alpha`, `Contin Lyrics/PNG`, `Working File/PSD`.
+  `Contin Videos/ProRes 4444`, `Contin Videos/Hap/Hap Alpha`, `Contin Lyrics/PNG`, `Titlebars` (one folder directly
+  under `Final Render`, without format folders), `Working File/PSD`. The `Titlebars` and `PSD` folders only exist in
+  projects that declare them (switching one on later, under **Declared assets**, creates the folder on Drive).
 * Each project has **one live status message** in its MG Group. Background scans and "Check progress" edit it in
   place (silently, no notification); `/status` moves it to the bottom of the chat with fresh numbers instead of
   posting another copy. The bot never creates that message on its own — the first `/status` does. Reminders and the
@@ -206,7 +256,8 @@ python -m mg_archive_bot.tools.reset_password
   A Team Lead then presses **Verify & archive** → **ARCHIVED** (announced). Removing files later makes it INCOMPLETE again.
 * Reminders go out daily at `REMINDER_HOUR` (in `TIMEZONE`) for INCOMPLETE projects, at most once per
   `REMINDER_MIN_GAP_HOURS`.
-* Previews: video files found in the declared `ProRes 4444` folders are downloaded, transcoded
+* Previews: video files found in the declared Timeline and Contin Videos `ProRes 4444` folders (not Titlebars,
+  which are overlays) are downloaded, transcoded
   (`H.264, ≤1280 px wide, CRF 26, faststart`) and uploaded to `<Project>/_Previews/` on Drive. The bot never uploads video
   to Telegram: **Preview** replies with a button that opens the MP4 in Google Drive's player, which streams the small
   file instantly (the multi-GB ProRes master is never opened). Previews are regenerated when the source file changes and
@@ -235,12 +286,24 @@ The suite (53 tests) covers services, validation/state machine, search ranking, 
   logged or sent to users. The service account can only reach the Drive folder shared with it.
 * **Access** requires the shared password once per Telegram account; 5 wrong attempts lock that account for
   15 minutes and alert the Super Admin. 30 wrong attempts across all accounts within 10 minutes pause registration
-  for 15 minutes (one alert). Revoked accounts cannot re-register. Unknown senders get at most one reply per minute.
+  for 15 minutes (one alert). Revoked accounts cannot re-register, receive no DMs and drop out of every assignment.
+  Unknown or revoked senders get at most one reply per minute. The password must be at least 12 characters and not a
+  well-known placeholder; the bot refuses to start with the `.env.example` password or example ids still in place.
+* **Resource limits**: file listings are bounded (200 folders / 2 000 files, 4 messages, 2 per user per minute),
+  `/status` re-posts at most once per minute per group, previews skip sources under 1 MB or over 20 GB and queue at
+  most 20 per project per scan, and outgoing messages go through Telegram flood control.
+* **Logging**: `LOG_LEVEL=DEBUG` only affects the bot's own messages; the Telegram library is kept at INFO so message
+  text (including passwords) is never written to the log. Google API errors shown to users carry no URLs or ids.
 * **Authorisation** is checked server-side for every command and every button press (crafted button data is
   rejected), the Super Admin is pinned to `SUPER_ADMIN_TELEGRAM_ID`, and group commands need both an authorised user
   and an authorised MG Group. Unauthorised groups the bot is added to are left after an hour.
-* **Input handling**: all user text is HTML-escaped, database access is parameterised, and Drive file names are never
-  used as local paths.
+* **Input handling**: all user text is HTML-escaped, database access is parameterised, Drive file names are never
+  used as local paths, button data is validated before use, and every user-influenced message is bounded (search
+  terms, tags, mentions, descriptions are capped and messages are clipped under Telegram's limit).
+* **Files the bot creates** (database, log, work directory) are private to its user; the Docker image runs as an
+  unprivileged user. `/activate` token attempts are rate-limited.
+* A full write-up of the security review, its methodology and residual risks is in `docs/SECURITY_REVIEW.md`; the
+  abuse cases run as regression tests in `tests/test_security.py`.
 * **What to do if something leaks**: bot token → regenerate it in @BotFather and update `.env`; service-account key →
   delete it in the Cloud Console *Keys* tab and download a new one; access password → `/setpassword` and revoke any
   unexpected users in `/users`.

@@ -27,6 +27,8 @@ class Settings(BaseSettings):
     password_breaker_window_minutes: int = 10  # ...inside this window...
     password_breaker_pause_minutes: int = 15  # ...pauses registration for this long
     status_cooldown_seconds: int = 60  # group /status re-uses the last check inside this window
+    files_per_user_per_minute: int = 2  # file-listing requests (buttons and /files) per user
+    files_max_chunks: int = 4  # Telegram messages per listing; the rest is "see Drive"
 
     # Storage
     database_url: str = "sqlite:///data/mg_archive.sqlite3"
@@ -48,6 +50,7 @@ class Settings(BaseSettings):
     folder_name_timeline: str = ""
     folder_name_contin_videos: str = ""
     folder_name_contin_lyrics: str = ""
+    folder_name_titlebars: str = ""
     folder_name_prores: str = ""
     folder_name_hap: str = ""
     folder_name_png: str = ""
@@ -56,6 +59,10 @@ class Settings(BaseSettings):
     # Previews
     ffmpeg_path: str = "ffmpeg"
     preview_max_width: int = 1280
+    preview_min_source_bytes: int = 1_000_000  # smaller "videos" are junk, not renders
+    preview_max_source_bytes: int = 20 * 1024**3  # refuse masters above 20 GiB
+    preview_max_per_scan: int = 20  # new previews queued per project per scan
+    preview_failure_dm_interval_minutes: int = 60  # unattended failure DMs to the creator, per project
     preview_crf: int = 26
     previews_enabled: bool = True
 
@@ -101,6 +108,7 @@ class Settings(BaseSettings):
             "timeline": self.folder_name_timeline,
             "contin_videos": self.folder_name_contin_videos,
             "contin_lyrics": self.folder_name_contin_lyrics,
+            "titlebars": self.folder_name_titlebars,
             "prores": self.folder_name_prores,
             "hap": self.folder_name_hap,
             "png": self.folder_name_png,
@@ -110,6 +118,10 @@ class Settings(BaseSettings):
     def validate_runtime(self) -> list[str]:
         """Return human-readable configuration problems (empty when OK)."""
         problems: list[str] = []
+        if self.super_admin_telegram_id == 123456789:
+            problems.append("SUPER_ADMIN_TELEGRAM_ID still has the example value; put your own Telegram id (ask @userinfobot)")
+        if "replace-with-token" in self.telegram_bot_token:
+            problems.append("TELEGRAM_BOT_TOKEN still has the example value; paste the token from @BotFather")
         if self.google_auth_mode == "service_account" and not self.google_service_account_file.exists():
             problems.append(f"GOOGLE_SERVICE_ACCOUNT_FILE not found: {self.google_service_account_file}")
         if self.google_auth_mode == "oauth" and not self.google_oauth_token_file.exists():

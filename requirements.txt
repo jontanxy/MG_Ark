@@ -1,4 +1,4 @@
-python-telegram-bot[job-queue]==22.8
+python-telegram-bot[job-queue,rate-limiter]==22.8
 SQLAlchemy==2.0.53
 google-api-python-client==2.200.0
 google-auth==2.58.0
