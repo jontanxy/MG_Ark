@@ -71,6 +71,60 @@ async def test_start_and_password_registration(harness):
     assert "No projects match" in bot.last(STRANGER.id)["text"]
 
 
+def menu_for(bot, user_id: int) -> list[str] | None:
+    """Command names most recently pushed to one person's private chat, newest push wins."""
+    for commands, scope in reversed(bot.commands):
+        if getattr(scope, "chat_id", None) == user_id:
+            return [c.command for c in commands]
+    return None
+
+
+VIEWER_MENU = ["start", "search", "whoami", "cancel", "help"]
+
+
+@pytest.mark.asyncio
+async def test_command_menu_follows_the_role(harness):
+    bot = harness.bot
+    await harness.command(STRANGER, "/start")
+    await harness.text(STRANGER, PASSWORD)
+    # a new Designer is offered nothing a Designer cannot use
+    assert menu_for(bot, STRANGER.id) == VIEWER_MENU
+
+    await harness.press(ADMIN, f"ad:u:{STRANGER.id}:role:TEAM_LEAD")
+    promoted = menu_for(bot, STRANGER.id)
+    assert {"newproject", "projects", "creategroup", "sheet"} <= set(promoted)
+    assert "users" not in promoted and "setpassword" not in promoted  # Super Admin commands stay out
+
+    # demotion takes the extra commands away again
+    await harness.press(ADMIN, f"ad:u:{STRANGER.id}:role:LIGHTS")
+    assert menu_for(bot, STRANGER.id) == VIEWER_MENU
+
+
+@pytest.mark.asyncio
+async def test_revoking_leaves_the_menu_and_restoring_repushes_it(harness):
+    bot = harness.bot
+    bot.commands.clear()
+    await harness.press(ADMIN, f"ad:u:{LEAD.id}:revoke")
+    # revocation pushes nothing: a revoked account is refused by the role gate anyway
+    assert menu_for(bot, LEAD.id) is None
+    await harness.press(ADMIN, f"ad:u:{LEAD.id}:restore")
+    assert "projects" in (menu_for(bot, LEAD.id) or [])
+
+
+@pytest.mark.asyncio
+async def test_startup_pushes_a_menu_for_every_active_user(harness):
+    from mg_archive_bot.bot.commands import refresh_command_menus
+
+    bot = harness.bot
+    bot.commands.clear()
+    applied = await refresh_command_menus(bot, ADMIN.id)
+    pushed = {scope.chat_id: [c.command for c in cmds] for cmds, scope in bot.commands}
+    assert applied == len(pushed) == 3  # Super Admin, Team Lead, Designer
+    assert "setpassword" in pushed[ADMIN.id]
+    assert "projects" in pushed[LEAD.id] and "setpassword" not in pushed[LEAD.id]
+    assert pushed[DESIGNER.id] == VIEWER_MENU
+
+
 @pytest.mark.asyncio
 async def test_lockout_after_five_failures(harness):
     bot = harness.bot
